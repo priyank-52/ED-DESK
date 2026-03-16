@@ -8,6 +8,7 @@ export default defineConfig({
     build: {
       outDir: 'dist/main',
       rollupOptions: {
+        external: ['electron', 'fs', 'os', 'path', 'util'],
         input: {
           index: resolve(__dirname, 'src/main/index.ts')
         }
@@ -19,6 +20,7 @@ export default defineConfig({
     build: {
       outDir: 'dist/preload',
       rollupOptions: {
+        external: ['electron'],
         input: {
           index: resolve(__dirname, 'src/preload/index.ts')
         }

@@ -2,6 +2,7 @@ import React, { useState, useEffect, createContext, useContext } from 'react'
 import { HashRouter as Router, Routes, Route, Navigate } from 'react-router-dom'
 import Navigation from './components/Navigation'
 import Home from './components/Home'
+import Chat from './components/Chat'
 import Assessment from './components/Assessment'
 import Quiz from './components/Quiz'
 import Poll from './components/Poll'
@@ -81,8 +82,11 @@ function App() {
 
   return (
     <AppContext.Provider value={{
-      currentUser, setCurrentUser,
-      deviceInfo, refreshDeviceInfo, scanNearbyDevices
+      currentUser,
+      setCurrentUser,
+      deviceInfo,
+      refreshDeviceInfo,
+      scanNearbyDevices
     }}>
       <Router>
         <div className="app">
@@ -90,6 +94,8 @@ function App() {
           <main className="main-content">
             <Routes>
               <Route path="/" element={<Home />} />
+              <Route path="/chat" element={<Chat />} />
+              <Route path="/chat/:sessionId" element={<Chat />} />
               <Route path="/assessment" element={<Assessment />} />
               <Route path="/quiz" element={<Quiz />} />
               <Route path="/poll" element={<Poll />} />

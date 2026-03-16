@@ -1,1013 +1,903 @@
-import React, { useState, useEffect } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { useApp } from '../App'
+import React, { useState, useEffect, useRef } from 'react'
+
+// ==================== TYPES ====================
+
+interface CPUInfo {
+  manufacturer: string
+  brand: string
+  speed: number
+  cores: number
+  physicalCores: number
+  usage: number
+  temperature: number
+  load: number
+  cache: any
+}
+
+interface MemoryInfo {
+  total: number
+  free: number
+  used: number
+  active: number
+  available: number
+  buffcache: number
+  swaptotal: number
+  swapused: number
+  percent: number
+}
+
+interface DiskInfo {
+  fs: string
+  size: number
+  used: number
+  available: number
+  use: number
+  mount: string
+}
+
+interface OSInfo {
+  platform: string
+  distro: string
+  release: string
+  kernel: string
+  arch: string
+  hostname: string
+  uptime: number
+  build: string
+  users: number
+}
+
+interface NetworkInfo {
+  iface: string
+  ip4: string
+  mac: string
+  speed: number
+  operstate: string
+  type: string
+  ssid?: string
+  signal?: number
+}
+
+interface BluetoothInfo {
+  available: boolean
+  enabled: boolean
+  devices: Array<{ name: string; connected: boolean }>
+}
+
+interface ProcessInfo {
+  pid: number
+  name: string
+  cpu: number
+  mem: number
+}
+
+interface BatteryInfo {
+  hasBattery: boolean
+  percent: number
+  discharging: boolean
+  timeRemaining: number
+}
+
+interface FullSystemInfo {
+  cpu: CPUInfo
+  memory: MemoryInfo
+  disk: DiskInfo[]
+  os: OSInfo
+  network: NetworkInfo[]
+  bluetooth: BluetoothInfo
+  processes: ProcessInfo[]
+  battery: BatteryInfo
+  node: {
+    pid: number
+    memory: NodeJS.MemoryUsage
+    version: string
+  }
+}
+
+// ==================== COMPONENT ====================
 
 export default function Home() {
-  const navigate = useNavigate()
-  const { currentUser, deviceInfo, scanNearbyDevices } = useApp()
+  // ==================== STATE ====================
   
-  // Modal states
-  const [showCreateModal, setShowCreateModal] = useState(false)
-  const [showJoinModal, setShowJoinModal] = useState(false)
-  const [joinMethod, setJoinMethod] = useState<'code' | 'nearby'>('nearby')
-  const [joinCode, setJoinCode] = useState('')
-  const [selectedDevice, setSelectedDevice] = useState<any>(null)
-  const [sessionPassword, setSessionPassword] = useState('')
-  
-  // Real system metrics
-  const [systemMetrics, setSystemMetrics] = useState({
-    cpu: '0%',
-    memory: '0/16GB',
-    memoryPercent: 0,
-    network: 'WiFi',
-    networkStrength: 0,
-    bluetooth: 'Disabled',
-    bluetoothDevices: 0,
-    uptime: '0h'
-  })
+  const [sys, setSys] = useState<FullSystemInfo | null>(null)
+  const [cpuHistory, setCpuHistory] = useState<number[]>([])
+  const [networkSpeed, setNetworkSpeed] = useState({ rx: 0, tx: 0 })
+  const [time, setTime] = useState(new Date())
+  const [logs, setLogs] = useState<string[]>([])
 
-  // Nearby sessions (simulated)
-  const [nearbySessions, setNearbySessions] = useState([
-    { 
-      id: '1', 
-      name: 'Data Structures Chat', 
-      type: 'chat', 
-      participants: 4,
-      isLocked: false,
-      signal: 95,
-      code: 'DS1234'
-    },
-    { 
-      id: '2', 
-      name: 'Algorithms Discussion', 
-      type: 'discussion', 
-      participants: 7,
-      isLocked: true,
-      signal: 87,
-      code: 'ALGO55'
-    },
-    { 
-      id: '3', 
-      name: 'Quiz: JavaScript', 
-      type: 'quiz', 
-      participants: 12,
-      isLocked: false,
-      signal: 76,
-      code: 'JS2024'
-    },
-    { 
-      id: '4', 
-      name: 'Assessment: Mid-term', 
-      type: 'assessment', 
-      participants: 23,
-      isLocked: true,
-      signal: 62,
-      code: 'MID101'
-    },
-    { 
-      id: '5', 
-      name: 'Poll: Course Feedback', 
-      type: 'poll', 
-      participants: 8,
-      isLocked: false,
-      signal: 54,
-      code: 'POLL22'
-    }
-  ])
-
-  // Real-time system metrics update
+  // Update time
   useEffect(() => {
-    const updateMetrics = () => {
-      // Simulate real CPU usage (random between 15-45%)
-      const cpuUsage = Math.floor(Math.random() * 30) + 15
-      
-      // Simulate real memory usage (random between 3-8GB)
-      const memoryUsed = (Math.random() * 5 + 3).toFixed(1)
-      const memoryPercent = Math.floor((parseFloat(memoryUsed) / 16) * 100)
-      
-      // Simulate network strength (random between 60-100%)
-      const networkStrength = Math.floor(Math.random() * 40) + 60
-      
-      // Simulate Bluetooth devices (random 0-3)
-      const btDevices = Math.floor(Math.random() * 4)
-      
-      // Calculate uptime (in hours)
-      const uptime = Math.floor(Math.random() * 24) + 1
-
-      setSystemMetrics({
-        cpu: `${cpuUsage}%`,
-        memory: `${memoryUsed}/16GB`,
-        memoryPercent,
-        network: networkStrength > 80 ? 'WiFi 5GHz' : 'WiFi 2.4GHz',
-        networkStrength,
-        bluetooth: btDevices > 0 ? 'Connected' : 'Disabled',
-        bluetoothDevices: btDevices,
-        uptime: `${uptime}h`
-      })
-    }
-
-    updateMetrics()
-    const interval = setInterval(updateMetrics, 3000)
-    return () => clearInterval(interval)
+    const timer = setInterval(() => setTime(new Date()), 1000)
+    return () => clearInterval(timer)
   }, [])
 
-  const handleCreateSession = (type: string) => {
-    const isLocked = type === 'assessment' || type === 'discussion'
-    const password = isLocked ? Math.floor(1000 + Math.random() * 9000).toString() : undefined
-    const sessionCode = Math.random().toString(36).substring(2, 8).toUpperCase()
+  // ==================== REAL SYSTEM DATA ====================
+
+  useEffect(() => {
+    const fetchSystem = async () => {
+      try {
+        const data = await window.electronAPI.getFullSystemInfo()
+        if (data) {
+          setSys(data)
+          // Keep only last log
+          setLogs([`[${time.toLocaleTimeString('en-US', { hour12: false })}] System updated`])
+        }
+        
+        const history = await window.electronAPI.getCPUHistory()
+        setCpuHistory(history)
+        
+        const speed = await window.electronAPI.getNetworkSpeed()
+        setNetworkSpeed(speed)
+      } catch (error) {
+        console.error('System fetch failed:', error)
+        setLogs([`[${time.toLocaleTimeString('en-US', { hour12: false })}] Error`])
+      }
+    }
+
+    fetchSystem()
+    const interval = setInterval(fetchSystem, 2000)
+    return () => clearInterval(interval)
+  }, [time])
+
+  // ==================== UTILITIES ====================
+
+  const formatBytes = (bytes: number): string => {
+    if (bytes === 0) return '0 B'
+    const units = ['B', 'KB', 'MB', 'GB', 'TB']
+    const i = Math.floor(Math.log(bytes) / Math.log(1024))
+    return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${units[i]}`
+  }
+
+  const formatUptime = (seconds: number): string => {
+    const days = Math.floor(seconds / 86400)
+    const hours = Math.floor((seconds % 86400) / 3600)
+    const minutes = Math.floor((seconds % 3600) / 60)
     
-    alert(`Session created!\nType: ${type}\nCode: ${sessionCode}\n${password ? 'Password: ' + password : 'Public Session'}`)
-    setShowCreateModal(false)
-    
-    // Navigate to the session type page
-    navigate(`/${type}`)
+    if (days > 0) return `${days}d ${hours}h ${minutes}m`
+    if (hours > 0) return `${hours}h ${minutes}m`
+    return `${minutes}m`
   }
 
-  const handleJoinByCode = () => {
-    if (!joinCode) return
-    const session = nearbySessions.find(s => s.code === joinCode)
-    if (session?.isLocked && !sessionPassword) {
-      alert('This session is locked. Please enter the password.')
-      return
-    }
-    alert(`Joining session: ${joinCode}`)
-    setShowJoinModal(false)
-    setJoinCode('')
-    setSessionPassword('')
+  const formatTime = (date: Date): string => {
+    return date.toLocaleTimeString('en-US', { 
+      hour12: false,
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit'
+    })
   }
 
-  const handleJoinDevice = (device: any) => {
-    if (device.isLocked) {
-      setSelectedDevice(device)
-    } else {
-      alert(`Joining public session: ${device.name}`)
-      navigate(`/${device.type}`)
-    }
+  // ==================== RENDER ====================
+
+  if (!sys) {
+    return (
+      <div className="loading">
+        <div className="loading-spinner" />
+        <div className="loading-text">INITIALIZING ED-DESK...</div>
+        <div className="loading-dots">
+          <span>.</span><span>.</span><span>.</span>
+        </div>
+        <style>{`
+          .loading {
+            height: 100vh;
+            background: #000;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            color: #1e3a5f;
+            font-family: 'SF Mono', monospace;
+          }
+          .loading-spinner {
+            width: 40px;
+            height: 40px;
+            border: 2px solid #1e3a5f;
+            border-top-color: transparent;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-bottom: 20px;
+          }
+          .loading-text {
+            font-size: 14px;
+            letter-spacing: 2px;
+            margin-bottom: 10px;
+          }
+          .loading-dots span {
+            animation: dots 1.5s infinite;
+            opacity: 0;
+          }
+          .loading-dots span:nth-child(2) { animation-delay: 0.5s; }
+          .loading-dots span:nth-child(3) { animation-delay: 1s; }
+          @keyframes spin { to { transform: rotate(360deg); } }
+          @keyframes dots {
+            0%, 100% { opacity: 0; }
+            50% { opacity: 1; }
+          }
+        `}</style>
+      </div>
+    )
   }
 
-  const handleJoinLockedDevice = () => {
-    if (selectedDevice && sessionPassword) {
-      alert(`Joining locked session: ${selectedDevice.name}`)
-      setSelectedDevice(null)
-      setSessionPassword('')
-      setShowJoinModal(false)
-      navigate(`/${selectedDevice.type}`)
-    }
+  // Find WiFi interface
+  const wifi = sys.network.find(n => n.type === 'wireless' || n.iface.toLowerCase().includes('wlan')) || {
+    iface: 'Wi-Fi',
+    ip4: '0.0.0.0',
+    mac: '00:00:00:00:00:00',
+    speed: 0,
+    operstate: 'down',
+    type: 'wireless',
+    ssid: 'No Connection',
+    signal: 0
   }
 
   return (
-    <div className="home">
-      {/* Header */}
-      <div className="header">
-        <div className="header-left">
-          <h1 className="welcome-title">
-            Welcome back, <span className="accent-text">{currentUser?.name || 'KK Professional'}</span>
-          </h1>
-        </div>
-        <div className="header-actions">
-          <button className="btn btn-primary" onClick={() => setShowCreateModal(true)}>
-            Create Session
-          </button>
-          <button className="btn btn-secondary" onClick={() => setShowJoinModal(true)}>
-            Join Session
-          </button>
-        </div>
-      </div>
-
-      {/* System Status Card */}
-      <div className="status-card">
-        <div className="status-grid">
-          <div className="status-item">
-            <div className="status-label">CPU</div>
-            <div className="status-value">{systemMetrics.cpu}</div>
-            <div className="status-bar">
-              <div className="status-fill" style={{ width: systemMetrics.cpu }}></div>
-            </div>
-          </div>
-          
-          <div className="status-item">
-            <div className="status-label">Memory</div>
-            <div className="status-value">{systemMetrics.memory}</div>
-            <div className="status-bar">
-              <div className="status-fill" style={{ width: `${systemMetrics.memoryPercent}%` }}></div>
-            </div>
-          </div>
-          
-          <div className="status-item">
-            <div className="status-label">Network</div>
-            <div className="status-value">{systemMetrics.network}</div>
-            <div className="status-bar">
-              <div className="status-fill" style={{ width: `${systemMetrics.networkStrength}%` }}></div>
-            </div>
-          </div>
-          
-          <div className="status-item">
-            <div className="status-label">Bluetooth</div>
-            <div className="status-value">
-              {systemMetrics.bluetooth} {systemMetrics.bluetoothDevices > 0 && `(${systemMetrics.bluetoothDevices})`}
-            </div>
-            <div className="status-indicator-dot ${systemMetrics.bluetoothDevices > 0 ? 'active' : ''}"></div>
-          </div>
-          
-          <div className="status-item">
-            <div className="status-label">Uptime</div>
-            <div className="status-value">{systemMetrics.uptime}</div>
-          </div>
-          
-          <div className="status-item">
-            <div className="status-label">IP Address</div>
-            <div className="status-value">{deviceInfo.ipAddress}</div>
+    <div className="app">
+      {/* ASCII Art Header with System Log */}
+      <div className="ascii-header">
+        <pre className="glitch" data-text={`
+  ███████╗██████╗       ██████╗ ███████╗███████╗██╗  ██╗
+  ██╔════╝██╔══██╗      ██╔══██╗██╔════╝██╔════╝██║ ██╔╝
+  █████╗  ██║  ██║█████╗██║  ██║█████╗  ███████╗█████╔╝ 
+  ██╔══╝  ██║  ██║╚════╝██║  ██║██╔══╝  ╚════██║██╔═██╗ 
+  ███████╗██████╔╝      ██████╔╝███████╗███████║██║  ██╗
+  ╚══════╝╚═════╝       ╚═════╝ ╚══════╝╚══════╝╚═╝  ╚═╝
+        `}>{`
+  ███████╗██████╗       ██████╗ ███████╗███████╗██╗  ██╗
+  ██╔════╝██╔══██╗      ██╔══██╗██╔════╝██╔════╝██║ ██╔╝
+  █████╗  ██║  ██║█████╗██║  ██║█████╗  ███████╗█████╔╝ 
+  ██╔══╝  ██║  ██║╚════╝██║  ██║██╔══╝  ╚════██║██╔═██╗ 
+  ███████╗██████╔╝      ██████╔╝███████╗███████║██║  ██╗
+  ╚══════╝╚═════╝       ╚═════╝ ╚══════╝╚══════╝╚═╝  ╚═╝
+        `}</pre>
+        <div className="header-info">
+          <span className="version-tag">v1.0.0</span>
+          <span className="time-tag">{formatTime(time)}</span>
+          <div className="system-log">
+            <span className="log-message">{logs[0] || '[System ready]'}</span>
           </div>
         </div>
       </div>
 
-      {/* Nearby Devices Visualization */}
-      <div className="nearby-section">
-        <div className="section-header">
-          <h2>Nearby Sessions</h2>
-          <span className="section-count">{nearbySessions.length} available</span>
-        </div>
-        
-        {/* Radar Visualization */}
-        <div className="radar-container">
-          <div className="radar">
-            <div className="radar-center"></div>
-            {nearbySessions.map((session, index) => {
-              // Calculate position in circle based on signal strength and index
-              const angle = (index / nearbySessions.length) * Math.PI * 2
-              const distance = 40 + (session.signal / 100) * 60 // 40-100px radius
-              const x = 150 + Math.cos(angle) * distance
-              const y = 150 + Math.sin(angle) * distance
-              
-              return (
-                <div
-                  key={session.id}
-                  className={`radar-dot ${session.isLocked ? 'locked' : 'public'}`}
-                  style={{ left: x, top: y }}
-                  title={`${session.name} (${session.signal}%)`}
-                  onClick={() => handleJoinDevice(session)}
-                >
-                  <span className="dot-tooltip">{session.name}</span>
-                </div>
-              )
-            })}
-            <div className="radar-sweep"></div>
+      {/* System Monitor Dashboard */}
+      <div className="dashboard">
+        {/* CPU Card */}
+        <div className="monitor-card">
+          <div className="card-header">
+            <span className="card-title">CPU</span>
+            <span className="card-value">{sys.cpu.usage}%</span>
+          </div>
+          <div className="card-body">
+            <div className="info-row">
+              <span>MODEL</span>
+              <span className="truncate">{sys.cpu.brand}</span>
+            </div>
+            <div className="info-row">
+              <span>CORES</span>
+              <span>{sys.cpu.cores} ({sys.cpu.physicalCores}P)</span>
+            </div>
+            <div className="info-row">
+              <span>SPEED</span>
+              <span>{sys.cpu.speed} MHz</span>
+            </div>
+            <div className="info-row">
+              <span>TEMP</span>
+              <span>{sys.cpu.temperature}°C</span>
+            </div>
+            <div className="progress-bar">
+              <div className="progress-fill" style={{ width: `${sys.cpu.usage}%` }} />
+            </div>
+            {/* Sparkline */}
+            <div className="sparkline">
+              {cpuHistory.slice(-20).map((value, i) => (
+                <div key={i} className="spark-bar" style={{ height: `${value}%` }} />
+              ))}
+            </div>
           </div>
         </div>
 
-        {/* Nearby Sessions List */}
-        <div className="sessions-list">
-          {nearbySessions.map(session => (
-            <div key={session.id} className="session-row" onClick={() => handleJoinDevice(session)}>
-              <div className="session-icon">
-                {session.type === 'chat' && '💬'}
-                {session.type === 'assessment' && '📝'}
-                {session.type === 'quiz' && '❓'}
-                {session.type === 'poll' && '📊'}
-                {session.type === 'discussion' && '🗣️'}
-              </div>
-              <div className="session-info">
-                <div className="session-name">{session.name}</div>
-                <div className="session-meta">
-                  <span className="session-type">{session.type}</span>
-                  <span className="session-participants">{session.participants} members</span>
-                </div>
-              </div>
-              <div className="session-status">
-                <div className="signal-strength">
-                  <div className="signal-bars">
-                    {[1,2,3,4].map(bar => (
-                      <div key={bar} className={`bar ${bar <= session.signal/25 ? 'active' : ''}`}></div>
-                    ))}
-                  </div>
-                </div>
-                {session.isLocked ? (
-                  <span className="lock-badge">Locked</span>
-                ) : (
-                  <span className="public-badge">Public</span>
-                )}
-              </div>
+        {/* Memory Card */}
+        <div className="monitor-card">
+          <div className="card-header">
+            <span className="card-title">MEMORY</span>
+            <span className="card-value">{Math.round(sys.memory.used / 1024 / 1024 / 1024 * 10) / 10} GB</span>
+          </div>
+          <div className="card-body">
+            <div className="info-row">
+              <span>TOTAL</span>
+              <span>{formatBytes(sys.memory.total)}</span>
             </div>
-          ))}
-        </div>
-      </div>
-
-      {/* Create Session Modal */}
-      {showCreateModal && (
-        <div className="modal-overlay" onClick={() => setShowCreateModal(false)}>
-          <div className="modal-content" onClick={e => e.stopPropagation()}>
-            <h3>Create Session</h3>
-            <div className="modal-body">
-              <div className="session-types">
-                <button className="type-btn" onClick={() => handleCreateSession('chat')}>
-                  <span className="type-icon">💬</span>
-                  <span className="type-name">Chat</span>
-                  <span className="type-desc">Public messaging</span>
-                </button>
-                <button className="type-btn" onClick={() => handleCreateSession('assessment')}>
-                  <span className="type-icon">📝</span>
-                  <span className="type-name">Assessment</span>
-                  <span className="type-desc">Locked with password</span>
-                </button>
-                <button className="type-btn" onClick={() => handleCreateSession('quiz')}>
-                  <span className="type-icon">❓</span>
-                  <span className="type-name">Quiz</span>
-                  <span className="type-desc">Interactive quiz</span>
-                </button>
-                <button className="type-btn" onClick={() => handleCreateSession('poll')}>
-                  <span className="type-icon">📊</span>
-                  <span className="type-name">Poll</span>
-                  <span className="type-desc">Live voting</span>
-                </button>
-                <button className="type-btn" onClick={() => handleCreateSession('discussion')}>
-                  <span className="type-icon">🗣️</span>
-                  <span className="type-name">Discussion</span>
-                  <span className="type-desc">Locked topic chat</span>
-                </button>
-              </div>
+            <div className="info-row">
+              <span>USED</span>
+              <span>{formatBytes(sys.memory.used)}</span>
             </div>
-            <button className="modal-close" onClick={() => setShowCreateModal(false)}>×</button>
+            <div className="info-row">
+              <span>FREE</span>
+              <span>{formatBytes(sys.memory.free)}</span>
+            </div>
+            <div className="info-row">
+              <span>CACHED</span>
+              <span>{formatBytes(sys.memory.buffcache)}</span>
+            </div>
+            <div className="progress-bar">
+              <div className="progress-fill" style={{ width: `${sys.memory.percent}%` }} />
+            </div>
           </div>
         </div>
-      )}
 
-      {/* Join Session Modal */}
-      {showJoinModal && (
-        <div className="modal-overlay" onClick={() => setShowJoinModal(false)}>
-          <div className="modal-content" onClick={e => e.stopPropagation()}>
-            <h3>Join Session</h3>
-            
-            <div className="join-tabs">
-              <button 
-                className={`tab-btn ${joinMethod === 'nearby' ? 'active' : ''}`}
-                onClick={() => setJoinMethod('nearby')}
-              >
-                Nearby
-              </button>
-              <button 
-                className={`tab-btn ${joinMethod === 'code' ? 'active' : ''}`}
-                onClick={() => setJoinMethod('code')}
-              >
-                Enter Code
-              </button>
+        {/* Disk Card */}
+        <div className="monitor-card">
+          <div className="card-header">
+            <span className="card-title">DISK</span>
+            <span className="card-value">{sys.disk[0]?.use || 0}%</span>
+          </div>
+          <div className="card-body">
+            {sys.disk.map((disk, index) => (
+              <div key={index} className="disk-item">
+                <div className="info-row">
+                  <span>{disk.fs}</span>
+                  <span>{formatBytes(disk.used)} / {formatBytes(disk.size)}</span>
+                </div>
+                <div className="mini-bar">
+                  <div className="mini-fill" style={{ width: `${disk.use}%` }} />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Network Card - WiFi + Bluetooth */}
+        <div className="monitor-card">
+          <div className="card-header">
+            <span className="card-title">NETWORK</span>
+            <span className="card-value">↓{(networkSpeed.rx / 1024).toFixed(0)}K</span>
+          </div>
+          <div className="card-body">
+            {/* WiFi Section */}
+            <div className="network-section">
+              <div className="info-row">
+                <span>Wi-Fi</span>
+                <span className={`status-badge ${wifi.operstate === 'up' ? 'active' : 'inactive'}`}>
+                  {wifi.operstate === 'up' ? 'ON' : 'OFF'}
+                </span>
+              </div>
+              <div className="info-row small">
+                <span>{wifi.ip4}</span>
+                <span>{wifi.speed} Mbps</span>
+              </div>
+              <div className="info-row small">
+                <span className="mac">{wifi.mac}</span>
+                {wifi.ssid && <span>{wifi.ssid}</span>}
+              </div>
             </div>
 
-            <div className="modal-body">
-              {joinMethod === 'nearby' ? (
-                <div className="nearby-list">
-                  {nearbySessions.map(session => (
-                    <div key={session.id} className="nearby-item" onClick={() => handleJoinDevice(session)}>
-                      <div className="nearby-icon">
-                        {session.type === 'chat' && '💬'}
-                        {session.type === 'assessment' && '📝'}
-                        {session.type === 'quiz' && '❓'}
-                        {session.type === 'poll' && '📊'}
-                        {session.type === 'discussion' && '🗣️'}
-                      </div>
-                      <div className="nearby-details">
-                        <div className="nearby-name">{session.name}</div>
-                        <div className="nearby-code">{session.code}</div>
-                      </div>
-                      <div className="nearby-signal">{session.signal}%</div>
-                      {session.isLocked && <span className="lock-icon">🔒</span>}
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <div className="code-join">
-                  <input
-                    type="text"
-                    className="code-input"
-                    placeholder="Enter 6-digit code"
-                    value={joinCode}
-                    onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
-                    maxLength={6}
-                  />
-                  <input
-                    type="password"
-                    className="password-input"
-                    placeholder="Password (if locked)"
-                    value={sessionPassword}
-                    onChange={(e) => setSessionPassword(e.target.value)}
-                  />
-                  <button className="btn btn-primary join-btn" onClick={handleJoinByCode}>
-                    Join Session
-                  </button>
+            {/* Bluetooth Section */}
+            <div className="network-section">
+              <div className="info-row">
+                <span>BLUETOOTH</span>
+                <span className={`status-badge ${sys.bluetooth.enabled ? 'active' : 'inactive'}`}>
+                  {sys.bluetooth.enabled ? 'ON' : 'OFF'}
+                </span>
+              </div>
+              {sys.bluetooth.enabled && sys.bluetooth.devices.length > 0 && (
+                <div className="info-row small">
+                  <span>DEVICES</span>
+                  <span>{sys.bluetooth.devices.length} connected</span>
                 </div>
               )}
             </div>
-
-            {/* Locked device password modal */}
-            {selectedDevice && (
-              <div className="nested-modal">
-                <div className="nested-content">
-                  <h4>Enter Password</h4>
-                  <p>Session: {selectedDevice.name}</p>
-                  <input
-                    type="password"
-                    className="password-input"
-                    placeholder="Session password"
-                    value={sessionPassword}
-                    onChange={(e) => setSessionPassword(e.target.value)}
-                    autoFocus
-                  />
-                  <div className="nested-actions">
-                    <button className="btn btn-secondary" onClick={() => setSelectedDevice(null)}>
-                      Cancel
-                    </button>
-                    <button className="btn btn-primary" onClick={handleJoinLockedDevice}>
-                      Join
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            <button className="modal-close" onClick={() => setShowJoinModal(false)}>×</button>
           </div>
         </div>
-      )}
 
-      {/* Footer */}
-      <footer className="footer">
-        Powered by <a href="https://kkprofessional.vercel.app/" target="_blank" rel="noopener noreferrer">KK Professional</a>
-      </footer>
+        {/* OS Card */}
+        <div className="monitor-card">
+          <div className="card-header">
+            <span className="card-title">SYSTEM</span>
+            <span className="card-value">{sys.os.platform}</span>
+          </div>
+          <div className="card-body">
+            <div className="info-row">
+              <span>OS</span>
+              <span>{sys.os.distro}</span>
+            </div>
+            <div className="info-row">
+              <span>KERNEL</span>
+              <span>{sys.os.kernel}</span>
+            </div>
+            <div className="info-row">
+              <span>ARCH</span>
+              <span>{sys.os.arch}</span>
+            </div>
+            <div className="info-row">
+              <span>USERS</span>
+              <span>{sys.os.users}</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Processes Card */}
+        <div className="monitor-card">
+          <div className="card-header">
+            <span className="card-title">PROCESSES</span>
+            <span className="card-value">PID • CPU</span>
+          </div>
+          <div className="card-body">
+            {sys.processes.slice(0, 5).map((proc, i) => (
+              <div key={i} className="process-row">
+                <span className="process-pid">{proc.pid}</span>
+                <span className="process-name truncate">{proc.name}</span>
+                <span className="process-cpu">{proc.cpu.toFixed(1)}%</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+               {/* Battery Card - Real Info */}
+        <div className="monitor-card">
+          <div className="card-header">
+            <span className="card-title">BATTERY</span>
+            <span className="card-value">
+              {sys.battery.hasBattery ? `${sys.battery.percent}%` : 'AC'}
+            </span>
+          </div>
+          <div className="card-body">
+            {sys.battery.hasBattery ? (
+              <>
+                <div className="info-row">
+                  <span>STATUS</span>
+                  <span>{sys.battery.discharging ? 'DISCHARGING' : 'CHARGING'}</span>
+                </div>
+                <div className="info-row">
+                  <span>REMAINING</span>
+                  <span>{Math.floor(sys.battery.timeRemaining / 60)} min</span>
+                </div>
+                <div className="info-row">
+                  <span>CAPACITY</span>
+                  <span>{sys.battery.percent}%</span>
+                </div>
+                <div className="progress-bar">
+                  <div className="progress-fill" style={{ width: `${sys.battery.percent}%` }} />
+                </div>
+              </>
+            ) : (
+              <div className="info-row">
+                <span>POWER</span>
+                <span>AC • 230V</span>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Status Card */}
+        <div className="monitor-card">
+          <div className="card-header">
+            <span className="card-title">STATUS</span>
+            <span className="card-value">✓</span>
+          </div>
+          <div className="card-body">
+            <div className="info-row">
+              <span>UPTIME</span>
+              <span>{formatUptime(sys.os.uptime)}</span>
+            </div>
+            <div className="info-row">
+              <span>PID</span>
+              <span>{sys.node.pid}</span>
+            </div>
+            <div className="info-row">
+              <span>NODE</span>
+              <span>{sys.node.version}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Footer - Simplified */}
+      <div className="footer">
+      
+        <span className="powered">POWERED BY KK PROFESSIONAL</span>
+      
+      </div>
+
+      {/* Scan Line Effect */}
+      <div className="scan-line" />
 
       <style>{`
-        .home {
-          max-width: 1200px;
-          margin: 0 auto;
-          padding: 1.5rem;
+        * {
+          margin: 0;
+          padding: 0;
+          box-sizing: border-box;
         }
 
-        /* Header */
-        .header {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          margin-bottom: 2rem;
-        }
-
-        .welcome-title {
-          font-size: 1.5rem;
-          font-weight: normal;
-          color: #ffffff;
-        }
-
-        .accent-text {
-          color: #1e3a5f;
-          font-weight: 500;
-        }
-
-        .header-actions {
-          display: flex;
-          gap: 0.8rem;
-        }
-
-        /* Status Card */
-        .status-card {
-          background: #1a1a1a;
-          border: 1px solid #2a2a2a;
-          border-radius: 8px;
-          padding: 1.2rem;
-          margin-bottom: 2rem;
-        }
-
-        .status-grid {
-          display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-          gap: 1rem;
-        }
-
-        .status-item {
-          padding: 0.5rem;
-        }
-
-        .status-label {
-          font-size: 0.75rem;
-          color: #999999;
-          text-transform: uppercase;
-          letter-spacing: 0.5px;
-          margin-bottom: 0.3rem;
-        }
-
-        .status-value {
-          font-size: 0.95rem;
-          color: #ffffff;
-          margin-bottom: 0.5rem;
-        }
-
-        .status-bar {
-          height: 4px;
-          background: #2a2a2a;
-          border-radius: 2px;
-          overflow: hidden;
-        }
-
-        .status-fill {
-          height: 100%;
-          background: #1e3a5f;
-          transition: width 0.3s ease;
-        }
-
-        .status-indicator-dot {
-          width: 8px;
-          height: 8px;
-          border-radius: 50%;
-          background: #4a4a4a;
-          margin-top: 0.3rem;
-        }
-
-        .status-indicator-dot.active {
-          background: #4caf50;
-        }
-
-        /* Nearby Section */
-        .nearby-section {
-          background: #1a1a1a;
-          border: 1px solid #2a2a2a;
-          border-radius: 8px;
-          padding: 1.5rem;
-        }
-
-        .section-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          margin-bottom: 1.5rem;
-        }
-
-        .section-header h2 {
-          font-size: 1.1rem;
-          color: #ffffff;
-        }
-
-        .section-count {
-          font-size: 0.85rem;
-          color: #999999;
-        }
-
-        /* Radar */
-        .radar-container {
-          display: flex;
-          justify-content: center;
-          margin-bottom: 2rem;
-        }
-
-        .radar {
-          position: relative;
-          width: 300px;
-          height: 300px;
-          border-radius: 50%;
-          background: #0a0a0a;
-          border: 1px solid #2a2a2a;
-          overflow: hidden;
-        }
-
-        .radar-center {
-          position: absolute;
-          top: 50%;
-          left: 50%;
-          width: 8px;
-          height: 8px;
-          background: #1e3a5f;
-          border-radius: 50%;
-          transform: translate(-50%, -50%);
-          z-index: 10;
-        }
-
-        .radar-dot {
-          position: absolute;
-          width: 8px;
-          height: 8px;
-          border-radius: 50%;
-          transform: translate(-50%, -50%);
-          cursor: pointer;
-          transition: all 0.2s ease;
-          z-index: 20;
-        }
-
-        .radar-dot.public {
-          background: #4caf50;
-        }
-
-        .radar-dot.locked {
-          background: #ff4444;
-        }
-
-        .radar-dot:hover {
-          transform: translate(-50%, -50%) scale(1.5);
-        }
-
-        .dot-tooltip {
-          position: absolute;
-          bottom: 100%;
-          left: 50%;
-          transform: translateX(-50%);
-          background: #2a2a2a;
-          color: #ffffff;
-          padding: 0.3rem 0.6rem;
-          border-radius: 4px;
-          font-size: 0.7rem;
-          white-space: nowrap;
-          border: 1px solid #3a3a3a;
-          margin-bottom: 0.5rem;
-          display: none;
-        }
-
-        .radar-dot:hover .dot-tooltip {
-          display: block;
-        }
-
-        .radar-sweep {
-          position: absolute;
-          top: 50%;
-          left: 50%;
-          width: 150px;
-          height: 150px;
-          background: linear-gradient(90deg, transparent, rgba(30, 58, 95, 0.1));
-          border-radius: 50%;
-          transform-origin: 0% 0%;
-          animation: sweep 4s linear infinite;
-        }
-
-        @keyframes sweep {
-          from { transform: rotate(0deg); }
-          to { transform: rotate(360deg); }
-        }
-
-        /* Sessions List */
-        .sessions-list {
+        .app {
+          height: 100vh;
+          background: #030303;
+          color: #fff;
+          font-family: 'SF Mono', 'Monaco', 'Fira Code', monospace;
+          font-size: 11px;
+          padding: 16px;
           display: flex;
           flex-direction: column;
-          gap: 0.5rem;
+          gap: 16px;
+          position: relative;
+          overflow: hidden;
         }
 
-        .session-row {
-          display: flex;
-          align-items: center;
-          padding: 0.8rem;
-          background: #0a0a0a;
-          border: 1px solid #2a2a2a;
-          border-radius: 6px;
-          cursor: pointer;
-          transition: all 0.2s ease;
-        }
-
-        .session-row:hover {
-          border-color: #1e3a5f;
-        }
-
-        .session-icon {
-          width: 32px;
-          height: 32px;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          background: #1a1a1a;
-          border-radius: 6px;
-          margin-right: 1rem;
-          color: #1e3a5f;
-        }
-
-        .session-info {
-          flex: 1;
-        }
-
-        .session-name {
-          font-size: 0.95rem;
-          color: #ffffff;
-          margin-bottom: 0.2rem;
-        }
-
-        .session-meta {
-          display: flex;
-          gap: 1rem;
-          font-size: 0.75rem;
-          color: #999999;
-        }
-
-        .session-status {
-          display: flex;
-          align-items: center;
-          gap: 1rem;
-        }
-
-        .signal-bars {
-          display: flex;
-          align-items: flex-end;
-          gap: 2px;
-          height: 16px;
-        }
-
-        .signal-bars .bar {
-          width: 3px;
-          background: #2a2a2a;
-          border-radius: 1px;
-          transition: background 0.2s ease;
-        }
-
-        .signal-bars .bar:nth-child(1) { height: 4px; }
-        .signal-bars .bar:nth-child(2) { height: 7px; }
-        .signal-bars .bar:nth-child(3) { height: 10px; }
-        .signal-bars .bar:nth-child(4) { height: 13px; }
-
-        .signal-bars .bar.active {
-          background: #4caf50;
-        }
-
-        .lock-badge {
-          font-size: 0.7rem;
-          color: #ff4444;
-          background: #331111;
-          padding: 0.2rem 0.5rem;
-          border-radius: 4px;
-        }
-
-        .public-badge {
-          font-size: 0.7rem;
-          color: #4caf50;
-          background: #113311;
-          padding: 0.2rem 0.5rem;
-          border-radius: 4px;
-        }
-
-        /* Modal */
-        .modal-overlay {
+        /* Scan Line Effect */
+        .scan-line {
           position: fixed;
           top: 0;
           left: 0;
           right: 0;
-          bottom: 0;
-          background: rgba(0, 0, 0, 0.8);
-          display: flex;
-          align-items: center;
-          justify-content: center;
+          height: 100%;
+          background: linear-gradient(
+            to bottom,
+            transparent 0%,
+            rgba(30, 58, 95, 0.03) 50%,
+            transparent 100%
+          );
+          pointer-events: none;
+          animation: scan 8s linear infinite;
           z-index: 1000;
         }
 
-        .modal-content {
-          background: #1a1a1a;
-          border: 1px solid #2a2a2a;
-          border-radius: 8px;
-          padding: 1.5rem;
-          max-width: 500px;
-          width: 90%;
-          position: relative;
-          max-height: 80vh;
-          overflow-y: auto;
+        @keyframes scan {
+          0% { transform: translateY(-100%); }
+          100% { transform: translateY(100%); }
         }
 
-        .modal-content h3 {
-          font-size: 1.1rem;
-          color: #ffffff;
-          margin-bottom: 1.2rem;
-        }
-
-        .modal-close {
-          position: absolute;
-          top: 1rem;
-          right: 1rem;
-          background: none;
-          border: none;
-          color: #999999;
-          font-size: 1.2rem;
-          cursor: pointer;
-        }
-
-        .modal-close:hover {
-          color: #ffffff;
-        }
-
-        .session-types {
-          display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-          gap: 0.8rem;
-        }
-
-        .type-btn {
+        /* ASCII Header with Glitch */
+        .ascii-header {
           background: #0a0a0a;
-          border: 1px solid #2a2a2a;
-          border-radius: 6px;
-          padding: 1rem 0.5rem;
+          border: 1px solid #1e3a5f;
+          padding: 12px 16px;
           display: flex;
-          flex-direction: column;
+          justify-content: space-between;
           align-items: center;
-          gap: 0.3rem;
-          cursor: pointer;
-          transition: all 0.2s ease;
-        }
-
-        .type-btn:hover {
-          border-color: #1e3a5f;
-        }
-
-        .type-icon {
-          font-size: 1.2rem;
-          color: #1e3a5f;
-        }
-
-        .type-name {
-          font-size: 0.85rem;
-          color: #ffffff;
-        }
-
-        .type-desc {
-          font-size: 0.65rem;
-          color: #999999;
-        }
-
-        .join-tabs {
-          display: flex;
-          gap: 0.5rem;
-          margin-bottom: 1.5rem;
-          border-bottom: 1px solid #2a2a2a;
-          padding-bottom: 0.5rem;
-        }
-
-        .tab-btn {
-          background: none;
-          border: none;
-          color: #999999;
-          padding: 0.5rem 1rem;
-          cursor: pointer;
-          font-size: 0.9rem;
           position: relative;
+          overflow: hidden;
         }
 
-        .tab-btn.active {
-          color: #ffffff;
-        }
-
-        .tab-btn.active::after {
+        .ascii-header::before {
           content: '';
           position: absolute;
-          bottom: -0.5rem;
-          left: 0;
-          right: 0;
+          top: 0;
+          left: -100%;
+          width: 100%;
           height: 2px;
-          background: #1e3a5f;
+          background: linear-gradient(90deg, transparent, #1e3a5f, transparent);
+          animation: scanline 3s linear infinite;
         }
 
-        .nearby-list {
-          max-height: 300px;
-          overflow-y: auto;
+        @keyframes scanline {
+          0% { left: -100%; }
+          100% { left: 100%; }
         }
 
-        .nearby-item {
-          display: flex;
-          align-items: center;
-          padding: 0.8rem;
-          border-bottom: 1px solid #2a2a2a;
-          cursor: pointer;
-        }
-
-        .nearby-item:hover {
-          background: #0a0a0a;
-        }
-
-        .nearby-icon {
-          width: 30px;
-          height: 30px;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          background: #0a0a0a;
-          border-radius: 4px;
-          margin-right: 1rem;
+        .glitch {
+          position: relative;
           color: #1e3a5f;
+          font-size: 8px;
+          line-height: 1.2;
+          text-shadow: 0 0 5px #1e3a5f;
         }
 
-        .nearby-details {
-          flex: 1;
+        .glitch::before,
+        .glitch::after {
+          content: attr(data-text);
+          position: absolute;
+          top: 0;
+          left: 0;
+          width: 100%;
+          height: 100%;
         }
 
-        .nearby-name {
-          font-size: 0.9rem;
-          color: #ffffff;
+        .glitch::before {
+          animation: glitch-1 0.5s infinite linear alternate-reverse;
+          color: #00ff88;
+          z-index: -1;
         }
 
-        .nearby-code {
-          font-size: 0.7rem;
-          color: #999999;
+        .glitch::after {
+          animation: glitch-2 0.5s infinite linear alternate-reverse;
+          color: #ff00ff;
+          z-index: -2;
         }
 
-        .nearby-signal {
-          font-size: 0.8rem;
-          color: #4caf50;
-          margin-right: 1rem;
+        @keyframes glitch-1 {
+          0% { transform: translate(0); }
+          20% { transform: translate(-1px, 1px); }
+          40% { transform: translate(-1px, -1px); }
+          60% { transform: translate(1px, 1px); }
+          80% { transform: translate(1px, -1px); }
+          100% { transform: translate(0); }
         }
 
-        .lock-icon {
-          color: #ff4444;
+        @keyframes glitch-2 {
+          0% { transform: translate(0); }
+          20% { transform: translate(1px, -1px); }
+          40% { transform: translate(1px, 1px); }
+          60% { transform: translate(-1px, -1px); }
+          80% { transform: translate(-1px, 1px); }
+          100% { transform: translate(0); }
         }
 
-        .code-join {
+        .header-info {
+          display: flex;
+          gap: 16px;
+          align-items: center;
+          background: #050505;
+          padding: 6px 12px;
+          border: 1px solid #1e3a5f;
+        }
+
+        .version-tag { color: #1e3a5f; }
+        .time-tag { color: #666; }
+
+        .system-log {
+          border-left: 1px solid #1e3a5f;
+          padding-left: 12px;
+          margin-left: 4px;
+        }
+
+        .log-message {
+          color: #1e3a5f;
+          font-size: 9px;
+          font-family: monospace;
+          animation: fadeIn 0.3s ease;
+        }
+
+        @keyframes fadeIn {
+          from { opacity: 0; transform: translateX(10px); }
+          to { opacity: 1; transform: translateX(0); }
+        }
+
+        /* Dashboard Grid */
+        .dashboard {
+          display: grid;
+          grid-template-columns: repeat(4, 1fr);
+          gap: 1px;
+          background: #1e3a5f;
+          border: 1px solid #1e3a5f;
+        }
+
+        .monitor-card {
+          background: #0a0a0a;
+          padding: 12px;
+          min-height: 160px;
           display: flex;
           flex-direction: column;
-          gap: 1rem;
+          gap: 8px;
+          transition: all 0.3s ease;
+          position: relative;
+          overflow: hidden;
         }
 
-        .code-input,
-        .password-input {
-          width: 100%;
-          padding: 0.8rem;
-          background: #0a0a0a;
-          border: 1px solid #2a2a2a;
-          border-radius: 4px;
-          color: #ffffff;
-          font-size: 1rem;
-          text-align: center;
-          letter-spacing: 2px;
-        }
-
-        .code-input:focus,
-        .password-input:focus {
-          outline: none;
-          border-color: #1e3a5f;
-        }
-
-        .join-btn {
-          width: 100%;
-          margin-top: 0.5rem;
-        }
-
-        .nested-modal {
-          position: fixed;
+        .monitor-card::after {
+          content: '';
+          position: absolute;
           top: 0;
           left: 0;
           right: 0;
           bottom: 0;
-          background: rgba(0, 0, 0, 0.5);
+          background: radial-gradient(circle at 50% 50%, rgba(30, 58, 95, 0.1), transparent 70%);
+          opacity: 0;
+          transition: opacity 0.3s;
+          pointer-events: none;
+        }
+
+        .monitor-card:hover::after {
+          opacity: 1;
+        }
+
+        .monitor-card:hover {
+          transform: translateY(-2px);
+          box-shadow: 0 5px 20px rgba(30, 58, 95, 0.3);
+        }
+
+        .card-header {
           display: flex;
+          justify-content: space-between;
           align-items: center;
-          justify-content: center;
-          z-index: 1100;
+          border-bottom: 1px solid #1e3a5f;
+          padding-bottom: 6px;
         }
 
-        .nested-content {
-          background: #1a1a1a;
-          border: 1px solid #2a2a2a;
-          border-radius: 8px;
-          padding: 1.5rem;
-          max-width: 300px;
-          width: 90%;
+        .card-title {
+          color: #666;
+          font-size: 10px;
+          letter-spacing: 1px;
         }
 
-        .nested-content h4 {
-          font-size: 1rem;
-          color: #ffffff;
-          margin-bottom: 0.5rem;
+        .card-value {
+          color: #1e3a5f;
+          font-size: 12px;
+          font-weight: 600;
+          text-shadow: 0 0 10px rgba(30, 58, 95, 0.5);
         }
 
-        .nested-content p {
-          font-size: 0.85rem;
-          color: #999999;
-          margin-bottom: 1rem;
-        }
-
-        .nested-actions {
-          display: flex;
-          gap: 0.8rem;
-          margin-top: 1rem;
-        }
-
-        .nested-actions button {
+        .card-body {
           flex: 1;
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
         }
+
+        .info-row {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          font-size: 10px;
+          color: #ccc;
+        }
+
+        .info-row.small {
+          font-size: 9px;
+          color: #666;
+        }
+
+        .truncate {
+          max-width: 120px;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+
+        .progress-bar {
+          height: 3px;
+          background: #222;
+          margin-top: 4px;
+          overflow: hidden;
+        }
+
+        .progress-fill {
+          height: 100%;
+          background: linear-gradient(90deg, #1e3a5f, #2a4a7a);
+          transition: width 0.3s;
+          position: relative;
+        }
+
+        .progress-fill::after {
+          content: '';
+          position: absolute;
+          top: 0;
+          left: 0;
+          right: 0;
+          bottom: 0;
+          background: linear-gradient(90deg, transparent, rgba(255,255,255,0.2), transparent);
+          animation: shimmer 2s infinite;
+        }
+
+        @keyframes shimmer {
+          0% { transform: translateX(-100%); }
+          100% { transform: translateX(100%); }
+        }
+
+        .mini-bar {
+          height: 2px;
+          background: #222;
+          margin: 2px 0;
+        }
+
+        .mini-fill {
+          height: 100%;
+          background: #1e3a5f;
+          transition: width 0.3s;
+        }
+
+        .sparkline {
+          display: flex;
+          align-items: flex-end;
+          gap: 1px;
+          height: 20px;
+          margin-top: 4px;
+        }
+
+        .spark-bar {
+          flex: 1;
+          background: #1e3a5f;
+          opacity: 0.5;
+          transition: height 0.3s;
+        }
+
+        .spark-bar:hover {
+          opacity: 1;
+        }
+
+        .disk-item {
+          margin-bottom: 4px;
+        }
+
+        .network-section {
+          margin-bottom: 8px;
+          padding-bottom: 4px;
+          border-bottom: 1px dotted #1e3a5f;
+        }
+
+        .network-section:last-child {
+          border-bottom: none;
+          margin-bottom: 0;
+          padding-bottom: 0;
+        }
+
+        .status-badge {
+          font-size: 8px;
+          padding: 2px 6px;
+          border-radius: 2px;
+          text-transform: uppercase;
+        }
+
+        .status-badge.active {
+          background: rgba(30, 58, 95, 0.2);
+          color: #1e3a5f;
+        }
+
+        .status-badge.inactive {
+          background: rgba(102, 102, 102, 0.2);
+          color: #999;
+        }
+
+        .mac {
+          font-family: monospace;
+          font-size: 8px;
+        }
+
+        .process-row {
+          display: flex;
+          gap: 6px;
+          font-size: 9px;
+          color: #999;
+          padding: 2px 0;
+          border-bottom: 1px dotted #1e3a5f;
+        }
+
+        .process-pid { width: 35px; color: #666; }
+        .process-name { flex: 1; color: #fff; }
+        .process-cpu { width: 35px; text-align: right; color: #1e3a5f; }
 
         /* Footer */
         .footer {
-          margin-top: 3rem;
-          padding-top: 1.5rem;
-          border-top: 1px solid #2a2a2a;
-          text-align: center;
-          font-size: 0.8rem;
-          color: #999999;
+          background: #0a0a0a;
+          border: 1px solid #1e3a5f;
+          padding: 8px 16px;
+          display: flex;
+          justify-content: center;
+          align-items: center;
+          gap: 12px;
+          font-size: 10px;
+          color: #666;
+          position: relative;
+          overflow: hidden;
         }
 
-        .footer a {
+        .footer::before {
+          content: '';
+          position: absolute;
+          top: 0;
+          left: 0;
+          right: 0;
+          height: 1px;
+          background: linear-gradient(90deg, transparent, #1e3a5f, transparent);
+        }
+
+        .footer-sep {
+          color: #333;
+        }
+
+        .powered {
           color: #1e3a5f;
-          text-decoration: none;
-        }
-
-        .footer a:hover {
-          text-decoration: underline;
         }
 
         /* Scrollbar */
         ::-webkit-scrollbar {
-          width: 6px;
-          height: 6px;
+          width: 4px;
+          height: 4px;
         }
 
         ::-webkit-scrollbar-track {
-          background: #1a1a1a;
+          background: #111;
         }
 
         ::-webkit-scrollbar-thumb {
-          background: #2a2a2a;
-          border-radius: 3px;
+          background: #222;
         }
 
         ::-webkit-scrollbar-thumb:hover {
@@ -1015,28 +905,26 @@ export default function Home() {
         }
 
         /* Responsive */
-        @media (max-width: 768px) {
-          .header {
-            flex-direction: column;
-            gap: 1rem;
-            text-align: center;
-          }
-
-          .status-grid {
+        @media (max-width: 1200px) {
+          .dashboard {
             grid-template-columns: repeat(2, 1fr);
           }
+        }
 
-          .radar {
-            width: 250px;
-            height: 250px;
-          }
-
-          .radar-dot {
-            transform: scale(0.8);
-          }
-
-          .session-types {
+        @media (max-width: 768px) {
+          .dashboard {
             grid-template-columns: 1fr;
+          }
+          
+          .header-info {
+            flex-direction: column;
+            gap: 8px;
+          }
+          
+          .footer {
+            flex-direction: column;
+            gap: 8px;
+            text-align: center;
           }
         }
       `}</style>

@@ -23,6 +23,15 @@ export default function Navigation() {
         </Link>
         
         <Link 
+          to="/chat" 
+          className={`nav-link ${isActive('/chat') ? 'active' : ''}`}
+        >
+          Chat
+          <span className="hover-indicator" />
+          {isActive('/chat') && <span className="active-indicator" />}
+        </Link>
+        
+        <Link 
           to="/assessment" 
           className={`nav-link ${isActive('/assessment') ? 'active' : ''}`}
         >
@@ -111,7 +120,6 @@ export default function Navigation() {
           color: #ffffff;
         }
 
-        /* Hover underline - appears on hover */
         .nav-link:hover .hover-indicator {
           width: 100%;
         }
@@ -127,7 +135,6 @@ export default function Navigation() {
           transition: width 0.2s ease;
         }
 
-        /* Active underline - visible for current page */
         .active-indicator {
           position: absolute;
           bottom: 0;
