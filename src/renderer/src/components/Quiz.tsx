@@ -1,6 +1,7 @@
-import React, { useState, useEffect } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
-import { useApp } from '../App'
+import React, { useState, useEffect, useRef } from 'react'
+import { useNavigate } from 'react-router-dom'
+
+// ==================== TYPES ====================
 
 interface QuizQuestion {
   id: string
@@ -11,6 +12,7 @@ interface QuizQuestion {
   category: string
   difficulty: 'easy' | 'medium' | 'hard'
   points: number
+  timeLimit?: number
 }
 
 interface QuizSession {
@@ -18,1445 +20,1272 @@ interface QuizSession {
   title: string
   description: string
   questions: QuizQuestion[]
-  timeLimit?: number
+  timeLimit: number
   shuffleQuestions: boolean
+  shuffleOptions: boolean
   createdBy: string
-  isLocked?: boolean
-  code?: string
-  participants?: number
+  isLocked: boolean
+  code: string
+  participants: number
+  maxParticipants: number
+  status: 'active' | 'scheduled' | 'ended'
+  category: string
+  difficulty: 'easy' | 'medium' | 'hard'
+  avgScore: number
+  attempts: number
+  createdAt: Date
 }
 
+interface LiveParticipant {
+  id: string
+  name: string
+  score: number
+  answered: number
+  total: number
+  status: 'answering' | 'completed' | 'idle'
+  joinedAt: Date
+}
+
+interface QuizStats {
+  totalQuizzes: number
+  activeNow: number
+  participantsToday: number
+  avgScore: number
+  questionsAnswered: number
+  topCategory: string
+}
+
+// ==================== COMPONENT ====================
+
 export default function QuizSystem() {
-  const { sessionId } = useParams()
   const navigate = useNavigate()
-  const { currentUser, deviceInfo } = useApp()
-  
-  // Mode selection
-  const [mode, setMode] = useState<'list' | 'create' | 'join' | 'take'>('list')
-  
-  // Quiz list state
-  const [quizzes, setQuizzes] = useState<QuizSession[]>([])
-  const [selectedCategory, setSelectedCategory] = useState<string>('all')
-  const [searchQuery, setSearchQuery] = useState('')
-  
-  // Join state
+
+  // ── View State ──
+  const [view, setView] = useState<'list' | 'join' | 'create' | 'take' | 'results' | 'leaderboard'>('list')
+  const [time, setTime] = useState(new Date())
+  const [logs, setLogs] = useState<string[]>([])
+
+  // ── List / Filter ──
+  const [search, setSearch] = useState('')
+  const [filterStatus, setFilterStatus] = useState<'all' | 'active' | 'scheduled' | 'ended'>('all')
+  const [filterDiff, setFilterDiff] = useState<'all' | 'easy' | 'medium' | 'hard'>('all')
+  const [filterCat, setFilterCat] = useState('all')
+
+  // ── Join ──
   const [joinCode, setJoinCode] = useState('')
-  const [joinPassword, setJoinPassword] = useState('')
-  const [availableQuizzes, setAvailableQuizzes] = useState<QuizSession[]>([])
-  
-  // Create quiz state
-  const [createStep, setCreateStep] = useState(1)
-  const [newQuiz, setNewQuiz] = useState({
-    title: '',
-    description: '',
-    timeLimit: 10,
-    shuffleQuestions: true,
-    isLocked: false,
-    password: ''
-  })
-  
-  // Active quiz state
-  const [activeQuiz, setActiveQuiz] = useState<QuizSession | null>(null)
-  const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0)
-  const [userAnswers, setUserAnswers] = useState<number[]>([])
-  const [quizStarted, setQuizStarted] = useState(false)
-  const [quizCompleted, setQuizCompleted] = useState(false)
-  const [score, setScore] = useState(0)
-  const [timeLeft, setTimeLeft] = useState<number>(0)
+  const [joinPass, setJoinPass] = useState('')
 
-  // Question creation state
+  // ── Create ──
+  const [step, setStep] = useState(1)
+  const [draftTitle, setDraftTitle] = useState('')
+  const [draftDesc, setDraftDesc] = useState('')
+  const [draftCategory, setDraftCategory] = useState('General')
+  const [draftDiff, setDraftDiff] = useState<'easy' | 'medium' | 'hard'>('medium')
+  const [draftTimeLimit, setDraftTimeLimit] = useState(10)
+  const [draftMaxPart, setDraftMaxPart] = useState(30)
+  const [draftLocked, setDraftLocked] = useState(false)
+  const [draftShuffle, setDraftShuffle] = useState(true)
+  const [draftShuffleOpts, setDraftShuffleOpts] = useState(false)
+  const [draftShowExpl, setDraftShowExpl] = useState(true)
+  const [draftInstant, setDraftInstant] = useState(true)
   const [questions, setQuestions] = useState<QuizQuestion[]>([])
-  const [currentQuestion, setCurrentQuestion] = useState<QuizQuestion>({
-    id: Math.random().toString(36).substr(2, 9),
-    question: '',
-    options: ['', '', '', ''],
-    correctAnswer: 0,
-    explanation: '',
-    category: 'general',
-    difficulty: 'easy',
-    points: 10
+  const [editQ, setEditQ] = useState<QuizQuestion>(blankQ())
+  const [genCode, setGenCode] = useState('')
+  const [genPass, setGenPass] = useState('')
+
+  // ── Take Quiz ──
+  const [activeQuiz, setActiveQuiz] = useState<QuizSession | null>(null)
+  const [qIndex, setQIndex] = useState(0)
+  const [answers, setAnswers] = useState<number[]>([])
+  const [revealed, setRevealed] = useState(false)
+  const [timeLeft, setTimeLeft] = useState(0)
+  const [quizDone, setQuizDone] = useState(false)
+  const [score, setScore] = useState(0)
+  const [liveBoard, setLiveBoard] = useState<LiveParticipant[]>([])
+  const [questionTimer, setQuestionTimer] = useState(0)
+
+  // ── Data ──
+  const [quizzes, setQuizzes] = useState<QuizSession[]>([
+    {
+      id: 'q1', title: 'Data Structures & Algorithms', description: 'Arrays, linked lists, trees, sorting algorithms and complexity analysis.',
+      questions: [
+        { id: 'qq1', question: 'What is the time complexity of binary search?', options: ['O(n)', 'O(log n)', 'O(n log n)', 'O(1)'], correctAnswer: 1, explanation: 'Binary search halves the search space each iteration.', category: 'algorithms', difficulty: 'easy', points: 10 },
+        { id: 'qq2', question: 'Which data structure uses LIFO ordering?', options: ['Queue', 'Deque', 'Stack', 'Heap'], correctAnswer: 2, explanation: 'Stack uses Last In First Out.', category: 'data-structures', difficulty: 'easy', points: 10 },
+        { id: 'qq3', question: 'What is the worst-case complexity of quicksort?', options: ['O(n log n)', 'O(n)', 'O(n²)', 'O(log n)'], correctAnswer: 2, explanation: 'Worst case occurs when pivot is always min or max.', category: 'algorithms', difficulty: 'medium', points: 15 },
+        { id: 'qq4', question: 'In a min-heap, where is the smallest element?', options: ['Leaf node', 'Root node', 'Last node', 'Random node'], correctAnswer: 1, explanation: 'The root of a min-heap always contains the minimum.', category: 'data-structures', difficulty: 'easy', points: 10 },
+      ],
+      timeLimit: 10, shuffleQuestions: true, shuffleOptions: false, createdBy: 'Prof. Sharma',
+      isLocked: false, code: 'DSA101', participants: 23, maxParticipants: 40,
+      status: 'active', category: 'Data Structures', difficulty: 'medium', avgScore: 74, attempts: 18, createdAt: new Date(Date.now() - 3600000)
+    },
+    {
+      id: 'q2', title: 'JavaScript Fundamentals', description: 'Closures, prototypes, async/await, event loop and ES6+ features.',
+      questions: [
+        { id: 'qq5', question: 'What is a closure in JavaScript?', options: ['Function accessing outer scope variables', 'A way to close browser tabs', 'A type of for-loop', 'Error handling mechanism'], correctAnswer: 0, explanation: 'Closure is when a function remembers its outer scope.', category: 'javascript', difficulty: 'medium', points: 15 },
+        { id: 'qq6', question: 'Which method adds an element to the end of an array?', options: ['shift()', 'unshift()', 'pop()', 'push()'], correctAnswer: 3, explanation: 'push() adds to end, pop() removes from end.', category: 'javascript', difficulty: 'easy', points: 10 },
+        { id: 'qq7', question: 'What does the "==" operator check?', options: ['Type and value', 'Value only', 'Reference only', 'Type only'], correctAnswer: 1, explanation: '== checks value with type coercion, === checks both.', category: 'javascript', difficulty: 'easy', points: 10 },
+      ],
+      timeLimit: 8, shuffleQuestions: true, shuffleOptions: false, createdBy: 'Dr. Verma',
+      isLocked: true, code: 'JS2024', participants: 15, maxParticipants: 30,
+      status: 'active', category: 'Web Dev', difficulty: 'medium', avgScore: 82, attempts: 15, createdAt: new Date(Date.now() - 1800000)
+    },
+    {
+      id: 'q3', title: 'Operating Systems Concepts', description: 'Process management, memory, scheduling and synchronization.',
+      questions: [
+        { id: 'qq8', question: 'What is a deadlock?', options: ['System crash', 'Circular wait for resources', 'High CPU usage', 'Memory overflow'], correctAnswer: 1, explanation: 'Deadlock occurs when processes wait for each other forever.', category: 'os', difficulty: 'hard', points: 20 },
+        { id: 'qq9', question: 'Which scheduling algorithm gives CPU to shortest job?', options: ['FCFS', 'Round Robin', 'SJF', 'Priority'], correctAnswer: 2, explanation: 'Shortest Job First minimizes average waiting time.', category: 'os', difficulty: 'medium', points: 15 },
+      ],
+      timeLimit: 5, shuffleQuestions: false, shuffleOptions: false, createdBy: 'Prof. Rao',
+      isLocked: true, code: 'OS404', participants: 8, maxParticipants: 25,
+      status: 'scheduled', category: 'Systems', difficulty: 'hard', avgScore: 0, attempts: 0, createdAt: new Date(Date.now() - 600000)
+    },
+    {
+      id: 'q4', title: 'Computer Networks Basics', description: 'OSI model, TCP/IP, routing protocols and network security.',
+      questions: [
+        { id: 'qq10', question: 'How many layers does the OSI model have?', options: ['5', '6', '7', '8'], correctAnswer: 2, explanation: 'OSI has 7 layers from Physical to Application.', category: 'networks', difficulty: 'easy', points: 10 },
+      ],
+      timeLimit: 6, shuffleQuestions: true, shuffleOptions: false, createdBy: 'Dr. Mehta',
+      isLocked: false, code: 'NET303', participants: 31, maxParticipants: 35,
+      status: 'ended', category: 'Networks', difficulty: 'easy', avgScore: 88, attempts: 31, createdAt: new Date(Date.now() - 7200000)
+    },
+  ])
+
+  const [stats, setStats] = useState<QuizStats>({
+    totalQuizzes: 4, activeNow: 2, participantsToday: 77,
+    avgScore: 81, questionsAnswered: 342, topCategory: 'Algorithms'
   })
 
-  // Load sample quizzes
+  // ── Effects ──
+
   useEffect(() => {
-    const sampleQuizzes: QuizSession[] = [
-      {
-        id: 'quiz-1',
-        title: 'Data Structures & Algorithms',
-        description: 'Test your DSA knowledge',
-        questions: [
-          {
-            id: 'q1',
-            question: 'What is the time complexity of binary search?',
-            options: ['O(n)', 'O(log n)', 'O(n²)', 'O(1)'],
-            correctAnswer: 1,
-            explanation: 'Binary search divides the search interval in half',
-            category: 'algorithms',
-            difficulty: 'easy',
-            points: 10
-          },
-          {
-            id: 'q2',
-            question: 'Which data structure uses LIFO?',
-            options: ['Queue', 'Stack', 'Array', 'List'],
-            correctAnswer: 1,
-            explanation: 'Stack follows Last In First Out',
-            category: 'data-structures',
-            difficulty: 'easy',
-            points: 10
-          }
-        ],
-        timeLimit: 10,
-        shuffleQuestions: true,
-        createdBy: 'Prof. Sharma',
-        isLocked: false,
-        code: 'DSA101',
-        participants: 23
-      },
-      {
-        id: 'quiz-2',
-        title: 'JavaScript Fundamentals',
-        description: 'Test your JavaScript knowledge',
-        questions: [
-          {
-            id: 'q3',
-            question: 'What is closure in JavaScript?',
-            options: [
-              'Function with access to outer scope',
-              'A way to close browser',
-              'Type of loop',
-              'Error handling'
-            ],
-            correctAnswer: 0,
-            explanation: 'Closure remembers outer variables',
-            category: 'javascript',
-            difficulty: 'medium',
-            points: 15
-          }
-        ],
-        timeLimit: 5,
-        shuffleQuestions: true,
-        createdBy: 'Dr. Verma',
-        isLocked: true,
-        code: 'JS2024',
-        participants: 15
-      }
-    ]
-    setQuizzes(sampleQuizzes)
-    setAvailableQuizzes(sampleQuizzes)
+    const t = setInterval(() => setTime(new Date()), 1000)
+    return () => clearInterval(t)
   }, [])
 
-  const startQuiz = (quiz: QuizSession) => {
-    const shuffled = quiz.shuffleQuestions 
-      ? [...quiz.questions].sort(() => Math.random() - 0.5)
-      : quiz.questions
-    
-    setActiveQuiz({ ...quiz, questions: shuffled })
-    setMode('take')
-    setQuizStarted(true)
-    setQuizCompleted(false)
-    setCurrentQuestionIndex(0)
-    setUserAnswers([])
-    setScore(0)
-    setTimeLeft((quiz.timeLimit || 0) * 60)
-  }
-
-  const handleAnswer = (answerIndex: number) => {
-    const newAnswers = [...userAnswers]
-    newAnswers[currentQuestionIndex] = answerIndex
-    setUserAnswers(newAnswers)
-
-    if (activeQuiz) {
-      const isCorrect = answerIndex === activeQuiz.questions[currentQuestionIndex].correctAnswer
-      if (isCorrect) {
-        setScore(score + activeQuiz.questions[currentQuestionIndex].points)
-      }
-    }
-  }
-
-  const nextQuestion = () => {
-    if (activeQuiz && currentQuestionIndex < activeQuiz.questions.length - 1) {
-      setCurrentQuestionIndex(currentQuestionIndex + 1)
-    } else {
-      setQuizCompleted(true)
-    }
-  }
-
-  const prevQuestion = () => {
-    if (currentQuestionIndex > 0) {
-      setCurrentQuestionIndex(currentQuestionIndex - 1)
-    }
-  }
-
+  // Live participant simulation
   useEffect(() => {
-    if (quizStarted && !quizCompleted && timeLeft > 0) {
-      const timer = setInterval(() => {
-        setTimeLeft(prev => {
-          if (prev <= 1) {
-            setQuizCompleted(true)
-            return 0
-          }
-          return prev - 1
-        })
-      }, 1000)
-      return () => clearInterval(timer)
-    }
-  }, [quizStarted, quizCompleted, timeLeft])
+    if (!activeQuiz) return
+    const interval = setInterval(() => {
+      setLiveBoard(prev => prev.map(p => {
+        if (p.status === 'answering' && Math.random() > 0.5) {
+          const newAns = Math.min(p.answered + 1, p.total)
+          return { ...p, answered: newAns, score: p.score + (Math.random() > 0.3 ? 10 : 0), status: newAns === p.total ? 'completed' : 'answering' }
+        }
+        return p
+      }))
+    }, 3000)
+    return () => clearInterval(interval)
+  }, [activeQuiz])
 
-  const formatTime = (seconds: number) => {
-    const mins = Math.floor(seconds / 60)
-    const secs = seconds % 60
-    return `${mins}:${secs.toString().padStart(2, '0')}`
+  // Quiz countdown
+  useEffect(() => {
+    if (view !== 'take' || quizDone || timeLeft <= 0) return
+    const t = setInterval(() => {
+      setTimeLeft(p => {
+        if (p <= 1) { setQuizDone(true); return 0 }
+        return p - 1
+      })
+    }, 1000)
+    return () => clearInterval(t)
+  }, [view, quizDone, timeLeft])
+
+  // Per-question timer
+  useEffect(() => {
+    if (view !== 'take' || quizDone || revealed) return
+    setQuestionTimer(30)
+    const t = setInterval(() => {
+      setQuestionTimer(p => {
+        if (p <= 1) { setRevealed(true); return 0 }
+        return p - 1
+      })
+    }, 1000)
+    return () => clearInterval(t)
+  }, [qIndex, view, quizDone])
+
+  // ── Utilities ──
+
+  function blankQ(): QuizQuestion {
+    return {
+      id: Math.random().toString(36).substr(2, 9),
+      question: '', options: ['', '', '', ''],
+      correctAnswer: 0, explanation: '',
+      category: 'general', difficulty: 'easy', points: 10
+    }
   }
 
-  const handleCreateQuiz = () => {
-    if (questions.length === 0) {
-      alert('Please add at least one question')
-      return
-    }
+  const ft = (d: Date) => d.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  const ftShort = (d: Date) => d.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' })
+  const addLog = (msg: string) => setLogs(prev => [`[${ft(new Date())}] ${msg}`, ...prev.slice(0, 29)])
 
-    const quizCode = Math.random().toString(36).substring(2, 8).toUpperCase()
-    const password = newQuiz.isLocked ? Math.floor(1000 + Math.random() * 9000).toString() : undefined
-    
-    const newQuizSession: QuizSession = {
-      id: `quiz-${Date.now()}`,
-      title: newQuiz.title,
-      description: newQuiz.description,
-      questions: questions,
-      timeLimit: newQuiz.timeLimit,
-      shuffleQuestions: newQuiz.shuffleQuestions,
-      createdBy: currentUser?.name || 'User',
-      isLocked: newQuiz.isLocked,
-      code: quizCode,
-      participants: 0
-    }
+  const fmtTimer = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
 
-    alert(`Quiz Created!\nCode: ${quizCode}\n${password ? 'Password: ' + password : 'Public Quiz'}`)
-    setMode('list')
-    setQuizzes([newQuizSession, ...quizzes])
-    setAvailableQuizzes([newQuizSession, ...availableQuizzes])
-    
-    // Reset form
-    setCreateStep(1)
-    setNewQuiz({
-      title: '',
-      description: '',
-      timeLimit: 10,
-      shuffleQuestions: true,
-      isLocked: false,
-      password: ''
-    })
-    setQuestions([])
+  const diffClass = (d: string) => d === 'easy' ? 'diff-easy' : d === 'medium' ? 'diff-med' : 'diff-hard'
+  const statClass = (s: string) => s === 'active' ? 'stat-active' : s === 'scheduled' ? 'stat-sched' : 'stat-ended'
+
+  const categories = ['all', ...Array.from(new Set(quizzes.flatMap(q => [q.category])))]
+
+  const filtered = quizzes.filter(q => {
+    if (filterStatus !== 'all' && q.status !== filterStatus) return false
+    if (filterDiff !== 'all' && q.difficulty !== filterDiff) return false
+    if (filterCat !== 'all' && q.category !== filterCat) return false
+    if (search && !q.title.toLowerCase().includes(search.toLowerCase()) && !q.code.toLowerCase().includes(search.toLowerCase())) return false
+    return true
+  })
+
+  // ── Actions ──
+
+  const startQuiz = (quiz: QuizSession) => {
+    const q = quiz.shuffleQuestions ? { ...quiz, questions: [...quiz.questions].sort(() => Math.random() - 0.5) } : quiz
+    setActiveQuiz(q)
+    setQIndex(0)
+    setAnswers([])
+    setRevealed(false)
+    setQuizDone(false)
+    setScore(0)
+    setTimeLeft(quiz.timeLimit * 60)
+    setView('take')
+    setLiveBoard([
+      { id: 'me', name: 'You', score: 0, answered: 0, total: quiz.questions.length, status: 'answering', joinedAt: new Date() },
+      { id: 'p2', name: 'Student_42', score: 0, answered: 0, total: quiz.questions.length, status: 'answering', joinedAt: new Date(Date.now() - 30000) },
+      { id: 'p3', name: 'Student_77', score: 0, answered: 0, total: quiz.questions.length, status: 'answering', joinedAt: new Date(Date.now() - 60000) },
+      { id: 'p4', name: 'Teacher Kumar', score: 0, answered: 0, total: quiz.questions.length, status: 'answering', joinedAt: new Date(Date.now() - 90000) },
+    ])
+    addLog(`STARTED quiz "${quiz.title}" • ${quiz.questions.length} questions`)
   }
 
-  const handleJoinQuiz = () => {
-    if (!joinCode) return
-    
-    const quiz = availableQuizzes.find(q => q.code === joinCode)
-    if (quiz?.isLocked && !joinPassword) {
-      alert('This quiz is locked. Please enter the password.')
-      return
+  const handleAnswer = (idx: number) => {
+    if (revealed || answers[qIndex] !== undefined) return
+    const newAns = [...answers]
+    newAns[qIndex] = idx
+    setAnswers(newAns)
+    if (draftInstant) setRevealed(true)
+    const correct = activeQuiz!.questions[qIndex].correctAnswer === idx
+    if (correct) setScore(s => s + activeQuiz!.questions[qIndex].points)
+    setLiveBoard(prev => prev.map(p => p.id === 'me' ? { ...p, answered: p.answered + 1, score: p.score + (correct ? activeQuiz!.questions[qIndex].points : 0) } : p))
+    addLog(`Q${qIndex + 1} answered — ${correct ? 'CORRECT' : 'WRONG'}`)
+  }
+
+  const nextQ = () => {
+    if (!activeQuiz) return
+    setRevealed(false)
+    if (qIndex < activeQuiz.questions.length - 1) {
+      setQIndex(i => i + 1)
+    } else {
+      setQuizDone(true)
+      setView('results')
+      addLog(`QUIZ COMPLETE — Score: ${score} pts`)
     }
-    
-    alert(`Joining quiz: ${joinCode}`)
-    startQuiz(quiz!)
+  }
+
+  const handleJoin = () => {
+    if (!joinCode.trim()) return
+    const found = quizzes.find(q => q.code === joinCode)
+    if (!found) { addLog(`JOIN FAILED — code ${joinCode} not found`); return }
+    if (found.isLocked && !joinPass.trim()) { addLog(`JOIN FAILED — password required`); return }
+    addLog(`JOINED quiz ${joinCode}`)
+    startQuiz(found)
+  }
+
+  const handleCreate = () => {
+    if (!draftTitle.trim() || questions.length === 0) return
+    const code = Math.random().toString(36).substring(2, 8).toUpperCase()
+    const pass = draftLocked ? Math.floor(1000 + Math.random() * 9000).toString() : ''
+    setGenCode(code)
+    setGenPass(pass)
+    const newQ: QuizSession = {
+      id: `q-${Date.now()}`, title: draftTitle, description: draftDesc,
+      questions, timeLimit: draftTimeLimit, shuffleQuestions: draftShuffle,
+      shuffleOptions: draftShuffleOpts, createdBy: 'You', isLocked: draftLocked,
+      code, participants: 0, maxParticipants: draftMaxPart, status: 'scheduled',
+      category: draftCategory, difficulty: draftDiff, avgScore: 0, attempts: 0, createdAt: new Date()
+    }
+    setQuizzes(prev => [newQ, ...prev])
+    setStats(prev => ({ ...prev, totalQuizzes: prev.totalQuizzes + 1 }))
+    addLog(`CREATED quiz "${draftTitle}" • ${code}`)
+    setStep(4)
   }
 
   const addQuestion = () => {
-    if (!currentQuestion.question) {
-      alert('Please enter a question')
-      return
-    }
-    
-    setQuestions([...questions, { ...currentQuestion, id: Math.random().toString(36).substr(2, 9) }])
-    setCurrentQuestion({
-      id: Math.random().toString(36).substr(2, 9),
-      question: '',
-      options: ['', '', '', ''],
-      correctAnswer: 0,
-      explanation: '',
-      category: 'general',
-      difficulty: 'easy',
-      points: 10
-    })
+    if (!editQ.question.trim()) return
+    setQuestions(prev => [...prev, { ...editQ, id: Math.random().toString(36).substr(2, 9) }])
+    setEditQ(blankQ())
+    addLog(`Q${questions.length + 1} added`)
   }
 
-  const categories = ['all', ...new Set(quizzes.flatMap(q => q.questions.map(qq => qq.category)))]
+  // ==================== RENDER ====================
 
-  // Quiz Taking View
-  if (mode === 'take' && activeQuiz && !quizCompleted) {
-    const currentQuestion = activeQuiz.questions[currentQuestionIndex]
-    const progress = ((currentQuestionIndex + 1) / activeQuiz.questions.length) * 100
-
-    return (
-      <div className="quiz-taking">
-        <div className="quiz-header">
-          <h2>{activeQuiz.title}</h2>
-          <div className="quiz-timer">⏱️ {formatTime(timeLeft)}</div>
-        </div>
-
-        <div className="quiz-progress">
-          <div className="progress-bar">
-            <div className="progress-fill" style={{ width: `${progress}%` }} />
-          </div>
-          <span>Question {currentQuestionIndex + 1} of {activeQuiz.questions.length}</span>
-        </div>
-
-        <div className="question-container">
-          <div className="question-header">
-            <span className="difficulty">{currentQuestion.difficulty}</span>
-            <span className="points">{currentQuestion.points} pts</span>
-          </div>
-
-          <h3 className="question-text">{currentQuestion.question}</h3>
-
-          <div className="options-grid">
-            {currentQuestion.options.map((option, index) => (
-              <button
-                key={index}
-                className={`option-btn ${userAnswers[currentQuestionIndex] === index ? 'selected' : ''}`}
-                onClick={() => handleAnswer(index)}
-              >
-                <span className="option-letter">{String.fromCharCode(65 + index)}</span>
-                {option}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div className="quiz-navigation">
-          <button className="btn btn-secondary" onClick={prevQuestion} disabled={currentQuestionIndex === 0}>
-            ← Previous
-          </button>
-          <button 
-            className="btn btn-primary" 
-            onClick={nextQuestion}
-            disabled={userAnswers[currentQuestionIndex] === undefined}
-          >
-            {currentQuestionIndex === activeQuiz.questions.length - 1 ? 'Finish' : 'Next →'}
-          </button>
-        </div>
-
-        <style>{`
-          .quiz-taking {
-            max-width: 700px;
-            margin: 0 auto;
-            padding: 1rem;
-          }
-
-          .quiz-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 2rem;
-          }
-
-          .quiz-header h2 {
-            font-size: 1.3rem;
-            color: #ffffff;
-          }
-
-          .quiz-timer {
-            background: #1e3a5f;
-            padding: 0.4rem 1rem;
-            border-radius: 4px;
-            font-size: 1rem;
-            font-weight: bold;
-            color: #ffffff;
-          }
-
-          .quiz-progress {
-            margin: 2rem 0;
-            text-align: right;
-            font-size: 0.9rem;
-            color: #999999;
-          }
-
-          .progress-bar {
-            height: 6px;
-            background: #2a2a2a;
-            border-radius: 3px;
-            margin-bottom: 0.5rem;
-            overflow: hidden;
-          }
-
-          .progress-fill {
-            height: 100%;
-            background: #1e3a5f;
-            transition: width 0.3s ease;
-          }
-
-          .question-container {
-            background: #1a1a1a;
-            border: 1px solid #2a2a2a;
-            border-radius: 6px;
-            padding: 1.5rem;
-            margin-bottom: 2rem;
-          }
-
-          .question-header {
-            display: flex;
-            justify-content: space-between;
-            margin-bottom: 1rem;
-          }
-
-          .difficulty {
-            padding: 0.2rem 0.6rem;
-            background: #2a2a2a;
-            border-radius: 4px;
-            font-size: 0.8rem;
-            text-transform: capitalize;
-            color: #cccccc;
-          }
-
-          .points {
-            color: #1e3a5f;
-            font-weight: bold;
-          }
-
-          .question-text {
-            font-size: 1.1rem;
-            margin-bottom: 1.5rem;
-            color: #ffffff;
-          }
-
-          .options-grid {
-            display: grid;
-            grid-template-columns: 1fr;
-            gap: 0.8rem;
-          }
-
-          .option-btn {
-            background: #0a0a0a;
-            border: 1px solid #2a2a2a;
-            color: #ffffff;
-            padding: 0.8rem;
-            border-radius: 4px;
-            display: flex;
-            align-items: center;
-            gap: 1rem;
-            cursor: pointer;
-            transition: all 0.2s ease;
-          }
-
-          .option-btn:hover {
-            border-color: #1e3a5f;
-          }
-
-          .option-btn.selected {
-            background: #1e3a5f;
-            border-color: #1e3a5f;
-          }
-
-          .option-letter {
-            width: 24px;
-            height: 24px;
-            background: #1a1a1a;
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-weight: bold;
-            font-size: 0.9rem;
-            color: #ffffff;
-          }
-
-          .option-btn.selected .option-letter {
-            background: #2a4a7a;
-          }
-
-          .quiz-navigation {
-            display: flex;
-            justify-content: space-between;
-            gap: 1rem;
-          }
-        `}</style>
-      </div>
-    )
-  }
-
-  // Quiz Results View
-  if (quizCompleted && activeQuiz) {
-    const totalPoints = activeQuiz.questions.reduce((sum, q) => sum + q.points, 0)
-    const percentage = (score / totalPoints) * 100
-
-    return (
-      <div className="quiz-results">
-        <h2>Quiz Complete!</h2>
-        
-        <div className="score-card">
-          <div className="score-circle">
-            <span className="score-value">{score}</span>
-            <span className="score-total">/{totalPoints}</span>
-          </div>
-          <div className="score-details">
-            <div>Score: {percentage.toFixed(1)}%</div>
-            <div>Correct: {userAnswers.filter((ans, idx) => ans === activeQuiz.questions[idx].correctAnswer).length}</div>
-            <div>Total: {activeQuiz.questions.length}</div>
-          </div>
-        </div>
-
-        <div className="results-actions">
-          <button className="btn btn-secondary" onClick={() => setMode('list')}>
-            Back to Quizzes
-          </button>
-          <button className="btn btn-primary" onClick={() => startQuiz(activeQuiz)}>
-            Try Again
-          </button>
-        </div>
-
-        <style>{`
-          .quiz-results {
-            max-width: 500px;
-            margin: 2rem auto;
-            text-align: center;
-          }
-
-          .quiz-results h2 {
-            font-size: 1.5rem;
-            margin-bottom: 2rem;
-            color: #ffffff;
-          }
-
-          .score-card {
-            background: #1a1a1a;
-            border: 1px solid #2a2a2a;
-            border-radius: 8px;
-            padding: 2rem;
-            margin-bottom: 2rem;
-          }
-
-          .score-circle {
-            width: 120px;
-            height: 120px;
-            margin: 0 auto 1rem;
-            background: #0a0a0a;
-            border-radius: 50%;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            border: 3px solid #1e3a5f;
-          }
-
-          .score-value {
-            font-size: 2rem;
-            font-weight: bold;
-            color: #1e3a5f;
-          }
-
-          .score-total {
-            font-size: 0.9rem;
-            color: #999999;
-          }
-
-          .score-details {
-            font-size: 1rem;
-            color: #cccccc;
-            line-height: 1.8;
-          }
-
-          .results-actions {
-            display: flex;
-            gap: 1rem;
-            justify-content: center;
-          }
-        `}</style>
-      </div>
-    )
-  }
-
-  // Join View
-  if (mode === 'join') {
-    return (
-      <div className="join-container">
-        <button className="back-btn" onClick={() => setMode('list')}>← Back</button>
-        
-        <div className="join-card">
-          <h2>Join Quiz</h2>
-          
-          <div className="nearby-quizzes">
-            <h3>Nearby Quizzes</h3>
-            {availableQuizzes.map(quiz => (
-              <div key={quiz.id} className="nearby-item" onClick={() => setJoinCode(quiz.code || '')}>
-                <div className="nearby-icon">❓</div>
-                <div className="nearby-details">
-                  <div className="nearby-title">{quiz.title}</div>
-                  <div className="nearby-meta">
-                    <span>By {quiz.createdBy}</span>
-                    <span>{quiz.participants} participants</span>
-                  </div>
-                </div>
-                <div className="nearby-signal">
-                  <div className="signal-bars">
-                    {[1,2,3,4].map(bar => (
-                      <div key={bar} className={`bar ${bar <= Math.random()*3+1 ? 'active' : ''}`}></div>
-                    ))}
-                  </div>
-                </div>
-                {quiz.isLocked && <span className="lock-icon">🔒</span>}
-              </div>
-            ))}
-          </div>
-
-          <div className="divider">
-            <span>or enter code manually</span>
-          </div>
-
-          <div className="manual-join">
-            <input
-              type="text"
-              className="code-input"
-              placeholder="Enter quiz code"
-              value={joinCode}
-              onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
-              maxLength={6}
-            />
-            <input
-              type="password"
-              className="password-input"
-              placeholder="Password (if locked)"
-              value={joinPassword}
-              onChange={(e) => setJoinPassword(e.target.value)}
-            />
-            <button className="btn btn-primary join-btn" onClick={handleJoinQuiz}>
-              Join Quiz
-            </button>
-          </div>
-        </div>
-
-        <style>{`
-          .join-container {
-            max-width: 600px;
-            margin: 0 auto;
-            padding: 1.5rem;
-          }
-
-          .back-btn {
-            background: none;
-            border: none;
-            color: #1e3a5f;
-            font-size: 0.9rem;
-            cursor: pointer;
-            margin-bottom: 1.5rem;
-          }
-
-          .join-card {
-            background: #1a1a1a;
-            border: 1px solid #2a2a2a;
-            border-radius: 8px;
-            padding: 2rem;
-          }
-
-          .join-card h2 {
-            font-size: 1.3rem;
-            color: #ffffff;
-            margin-bottom: 1.5rem;
-          }
-
-          .nearby-quizzes {
-            margin-bottom: 2rem;
-          }
-
-          .nearby-quizzes h3 {
-            font-size: 0.9rem;
-            color: #999999;
-            margin-bottom: 1rem;
-          }
-
-          .nearby-item {
-            display: flex;
-            align-items: center;
-            padding: 1rem;
-            background: #0a0a0a;
-            border: 1px solid #2a2a2a;
-            border-radius: 6px;
-            margin-bottom: 0.5rem;
-            cursor: pointer;
-            transition: all 0.2s ease;
-          }
-
-          .nearby-item:hover {
-            border-color: #1e3a5f;
-          }
-
-          .nearby-icon {
-            width: 36px;
-            height: 36px;
-            background: #1a1a1a;
-            border-radius: 6px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            margin-right: 1rem;
-            color: #ffffff;
-          }
-
-          .nearby-details {
-            flex: 1;
-          }
-
-          .nearby-title {
-            font-size: 0.95rem;
-            color: #ffffff;
-            margin-bottom: 0.2rem;
-          }
-
-          .nearby-meta {
-            display: flex;
-            gap: 1rem;
-            font-size: 0.7rem;
-            color: #999999;
-          }
-
-          .signal-bars {
-            display: flex;
-            align-items: flex-end;
-            gap: 2px;
-            height: 20px;
-            margin-right: 1rem;
-          }
-
-          .signal-bars .bar {
-            width: 3px;
-            background: #2a2a2a;
-            border-radius: 1px;
-            transition: background 0.2s ease;
-          }
-
-          .signal-bars .bar:nth-child(1) { height: 6px; }
-          .signal-bars .bar:nth-child(2) { height: 9px; }
-          .signal-bars .bar:nth-child(3) { height: 12px; }
-          .signal-bars .bar:nth-child(4) { height: 15px; }
-
-          .signal-bars .bar.active {
-            background: #4caf50;
-          }
-
-          .lock-icon {
-            color: #ff4444;
-          }
-
-          .divider {
-            position: relative;
-            text-align: center;
-            margin: 2rem 0;
-          }
-
-          .divider::before {
-            content: '';
-            position: absolute;
-            top: 50%;
-            left: 0;
-            right: 0;
-            height: 1px;
-            background: #2a2a2a;
-            z-index: 1;
-          }
-
-          .divider span {
-            position: relative;
-            z-index: 2;
-            background: #1a1a1a;
-            padding: 0 1rem;
-            color: #999999;
-            font-size: 0.8rem;
-          }
-
-          .manual-join {
-            display: flex;
-            flex-direction: column;
-            gap: 1rem;
-          }
-
-          .code-input,
-          .password-input {
-            width: 100%;
-            padding: 0.8rem;
-            background: #0a0a0a;
-            border: 1px solid #2a2a2a;
-            border-radius: 4px;
-            color: #ffffff;
-            font-size: 1rem;
-            text-align: center;
-            letter-spacing: 2px;
-          }
-
-          .code-input:focus,
-          .password-input:focus {
-            outline: none;
-            border-color: #1e3a5f;
-          }
-
-          .join-btn {
-            width: 100%;
-            margin-top: 0.5rem;
-          }
-        `}</style>
-      </div>
-    )
-  }
-
-  // Create View
-  if (mode === 'create') {
-    return (
-      <div className="create-container">
-        <button className="back-btn" onClick={() => setMode('list')}>← Back</button>
-
-        <div className="create-card">
-          <h2>Create Quiz</h2>
-          
-          <div className="create-tabs">
-            <button 
-              className={`tab ${createStep === 1 ? 'active' : ''}`}
-              onClick={() => setCreateStep(1)}
-            >
-              Basic Info
-            </button>
-            <button 
-              className={`tab ${createStep === 2 ? 'active' : ''}`}
-              onClick={() => setCreateStep(2)}
-            >
-              Questions ({questions.length})
-            </button>
-          </div>
-
-          {createStep === 1 && (
-            <div className="basic-info">
-              <div className="form-group">
-                <label>Quiz Title</label>
-                <input
-                  type="text"
-                  value={newQuiz.title}
-                  onChange={(e) => setNewQuiz({ ...newQuiz, title: e.target.value })}
-                  placeholder="e.g., JavaScript Basics Quiz"
-                />
-              </div>
-
-              <div className="form-group">
-                <label>Description</label>
-                <textarea
-                  value={newQuiz.description}
-                  onChange={(e) => setNewQuiz({ ...newQuiz, description: e.target.value })}
-                  placeholder="Describe your quiz"
-                  rows={3}
-                />
-              </div>
-
-              <div className="form-group">
-                <label>Time Limit (minutes)</label>
-                <input
-                  type="number"
-                  value={newQuiz.timeLimit}
-                  onChange={(e) => setNewQuiz({ ...newQuiz, timeLimit: parseInt(e.target.value) })}
-                  min="1"
-                  max="120"
-                />
-              </div>
-
-              <div className="form-group checkbox">
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={newQuiz.shuffleQuestions}
-                    onChange={(e) => setNewQuiz({ ...newQuiz, shuffleQuestions: e.target.checked })}
-                  />
-                  Shuffle Questions
-                </label>
-              </div>
-
-              <div className="form-group checkbox">
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={newQuiz.isLocked}
-                    onChange={(e) => setNewQuiz({ ...newQuiz, isLocked: e.target.checked })}
-                  />
-                  Locked Quiz (requires password)
-                </label>
-              </div>
-            </div>
-          )}
-
-          {createStep === 2 && (
-            <div className="questions-section">
-              <div className="questions-list">
-                <h3>Added Questions</h3>
-                {questions.map((q, idx) => (
-                  <div key={q.id} className="question-preview">
-                    <span className="q-number">{idx + 1}</span>
-                    <span className="q-text">{q.question.substring(0, 30)}...</span>
-                    <span className="q-points">{q.points} pts</span>
-                  </div>
-                ))}
-              </div>
-
-              <div className="add-question">
-                <h3>Add Question</h3>
-                
-                <div className="form-group">
-                  <label>Question</label>
-                  <input
-                    type="text"
-                    value={currentQuestion.question}
-                    onChange={(e) => setCurrentQuestion({ ...currentQuestion, question: e.target.value })}
-                    placeholder="Enter your question"
-                  />
-                </div>
-
-                <div className="form-row">
-                  <div className="form-group">
-                    <label>Difficulty</label>
-                    <select
-                      value={currentQuestion.difficulty}
-                      onChange={(e) => setCurrentQuestion({ ...currentQuestion, difficulty: e.target.value as any })}
-                    >
-                      <option value="easy">Easy</option>
-                      <option value="medium">Medium</option>
-                      <option value="hard">Hard</option>
-                    </select>
-                  </div>
-
-                  <div className="form-group">
-                    <label>Points</label>
-                    <input
-                      type="number"
-                      value={currentQuestion.points}
-                      onChange={(e) => setCurrentQuestion({ ...currentQuestion, points: parseInt(e.target.value) })}
-                      min="1"
-                      max="50"
-                    />
-                  </div>
-                </div>
-
-                <div className="form-group">
-                  <label>Category</label>
-                  <input
-                    type="text"
-                    value={currentQuestion.category}
-                    onChange={(e) => setCurrentQuestion({ ...currentQuestion, category: e.target.value })}
-                    placeholder="e.g., algorithms, javascript"
-                  />
-                </div>
-
-                <div className="options-section">
-                  <label>Options</label>
-                  {currentQuestion.options.map((opt, idx) => (
-                    <div key={idx} className="option-input">
-                      <input
-                        type="text"
-                        value={opt}
-                        onChange={(e) => {
-                          const newOptions = [...currentQuestion.options]
-                          newOptions[idx] = e.target.value
-                          setCurrentQuestion({ ...currentQuestion, options: newOptions })
-                        }}
-                        placeholder={`Option ${String.fromCharCode(65 + idx)}`}
-                      />
-                      <input
-                        type="radio"
-                        name="correctOption"
-                        checked={currentQuestion.correctAnswer === idx}
-                        onChange={() => setCurrentQuestion({ ...currentQuestion, correctAnswer: idx })}
-                      />
-                    </div>
-                  ))}
-                </div>
-
-                <div className="form-group">
-                  <label>Explanation (Optional)</label>
-                  <textarea
-                    value={currentQuestion.explanation}
-                    onChange={(e) => setCurrentQuestion({ ...currentQuestion, explanation: e.target.value })}
-                    placeholder="Explain the correct answer"
-                    rows={2}
-                  />
-                </div>
-
-                <button className="btn btn-primary add-question-btn" onClick={addQuestion}>
-                  Add Question
-                </button>
-              </div>
-            </div>
-          )}
-
-          <div className="create-actions">
-            <button className="btn btn-secondary" onClick={() => setMode('list')}>
-              Cancel
-            </button>
-            {createStep === 1 ? (
-              <button 
-                className="btn btn-primary" 
-                onClick={() => setCreateStep(2)}
-                disabled={!newQuiz.title}
-              >
-                Next: Add Questions
-              </button>
-            ) : (
-              <button 
-                className="btn btn-primary" 
-                onClick={handleCreateQuiz}
-                disabled={questions.length === 0}
-              >
-                Create Quiz
-              </button>
-            )}
-          </div>
-        </div>
-
-        <style>{`
-          .create-container {
-            max-width: 800px;
-            margin: 0 auto;
-            padding: 1.5rem;
-          }
-
-          .create-card {
-            background: #1a1a1a;
-            border: 1px solid #2a2a2a;
-            border-radius: 8px;
-            padding: 2rem;
-          }
-
-          .create-card h2 {
-            font-size: 1.3rem;
-            color: #ffffff;
-            margin-bottom: 1.5rem;
-          }
-
-          .create-tabs {
-            display: flex;
-            gap: 1rem;
-            margin-bottom: 2rem;
-            border-bottom: 1px solid #2a2a2a;
-            padding-bottom: 0.5rem;
-          }
-
-          .tab {
-            background: none;
-            border: none;
-            color: #999999;
-            padding: 0.5rem 1rem;
-            cursor: pointer;
-            font-size: 0.9rem;
-          }
-
-          .tab.active {
-            color: #ffffff;
-            border-bottom: 2px solid #1e3a5f;
-          }
-
-          .basic-info {
-            margin-bottom: 2rem;
-          }
-
-          .form-group {
-            margin-bottom: 1.5rem;
-          }
-
-          .form-group label {
-            display: block;
-            margin-bottom: 0.5rem;
-            color: #cccccc;
-            font-size: 0.9rem;
-          }
-
-          .form-group input,
-          .form-group textarea,
-          .form-group select {
-            width: 100%;
-            padding: 0.6rem;
-            background: #0a0a0a;
-            border: 1px solid #2a2a2a;
-            border-radius: 4px;
-            color: #ffffff;
-            font-size: 0.9rem;
-          }
-
-          .form-group input:focus,
-          .form-group textarea:focus,
-          .form-group select:focus {
-            outline: none;
-            border-color: #1e3a5f;
-          }
-
-          .form-group.checkbox label {
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-            cursor: pointer;
-          }
-
-          .form-group.checkbox input {
-            width: auto;
-          }
-
-          .form-row {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 1rem;
-          }
-
-          .questions-section {
-            display: grid;
-            grid-template-columns: 200px 1fr;
-            gap: 1.5rem;
-          }
-
-          .questions-list {
-            background: #0a0a0a;
-            border: 1px solid #2a2a2a;
-            border-radius: 4px;
-            padding: 1rem;
-            max-height: 400px;
-            overflow-y: auto;
-          }
-
-          .questions-list h3 {
-            font-size: 0.9rem;
-            color: #ffffff;
-            margin-bottom: 1rem;
-          }
-
-          .question-preview {
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-            padding: 0.5rem;
-            border-bottom: 1px solid #2a2a2a;
-            font-size: 0.8rem;
-          }
-
-          .q-number {
-            color: #1e3a5f;
-            font-weight: bold;
-          }
-
-          .q-text {
-            flex: 1;
-            color: #cccccc;
-          }
-
-          .q-points {
-            color: #999999;
-          }
-
-          .add-question {
-            background: #0a0a0a;
-            border: 1px solid #2a2a2a;
-            border-radius: 4px;
-            padding: 1.5rem;
-          }
-
-          .add-question h3 {
-            font-size: 1rem;
-            color: #ffffff;
-            margin-bottom: 1.5rem;
-          }
-
-          .options-section {
-            margin: 1.5rem 0;
-          }
-
-          .options-section label {
-            display: block;
-            margin-bottom: 0.5rem;
-            color: #cccccc;
-          }
-
-          .option-input {
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-            margin-bottom: 0.5rem;
-          }
-
-          .option-input input[type="text"] {
-            flex: 1;
-            padding: 0.5rem;
-            background: #1a1a1a;
-            border: 1px solid #2a2a2a;
-            border-radius: 4px;
-            color: #ffffff;
-          }
-
-          .option-input input[type="radio"] {
-            width: auto;
-          }
-
-          .add-question-btn {
-            width: 100%;
-            margin-top: 1rem;
-          }
-
-          .create-actions {
-            display: flex;
-            justify-content: flex-end;
-            gap: 1rem;
-            margin-top: 2rem;
-            padding-top: 1.5rem;
-            border-top: 1px solid #2a2a2a;
-          }
-        `}</style>
-      </div>
-    )
-  }
-
-  // List View (Default)
   return (
-    <div className="quiz-system">
-      <div className="quiz-header">
-        <h1>Quizzes</h1>
-        <div className="quiz-stats">
-          <span>{quizzes.length} Available</span>
-          <span>{deviceInfo.nearbyDevices.length} Online</span>
+    <div className="qroot">
+
+      {/* ── PAGE HEADER ── */}
+      <div className="q-page-header">
+        <div className="q-page-title">
+          <span className="q-title-text">QUIZ MODULE</span>
+          <span className="q-title-sub">REAL-TIME INTERACTIVE QUIZ SYSTEM • LAN-BASED</span>
         </div>
-        <div className="header-actions">
-          <button className="btn btn-primary" onClick={() => setMode('create')}>
-            Create Quiz
-          </button>
-          <button className="btn btn-secondary" onClick={() => setMode('join')}>
-            Join Quiz
-          </button>
+        <div className="q-page-meta">
+          <span className="q-version">v1.0.0</span>
+          <span className="q-time">{ftShort(time)}</span>
+          <div className="q-log-box">
+            <span className="q-log-line">{logs[0] || '[System ready]'}</span>
+          </div>
         </div>
       </div>
 
-      <div className="quiz-filters">
-        <div className="search-bar">
-          <span className="search-icon">🔍</span>
-          <input
-            type="text"
-            placeholder="Search quizzes..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-          />
-        </div>
-        <select value={selectedCategory} onChange={(e) => setSelectedCategory(e.target.value)}>
-          {categories.map(cat => (
-            <option key={cat} value={cat}>{cat}</option>
-          ))}
-        </select>
-      </div>
-
-      <div className="quizzes-grid">
-        {quizzes.map(quiz => (
-          <div key={quiz.id} className="quiz-card">
-            <div className="quiz-card-header">
-              <h3>{quiz.title}</h3>
-              {quiz.isLocked && <span className="lock-badge">Locked</span>}
+      {/* ── STATS GRID ── */}
+      <div className="q-stats-grid">
+        {[
+          { label: 'TOTAL QUIZZES', val: stats.totalQuizzes, pct: 100 },
+          { label: 'ACTIVE NOW', val: stats.activeNow, pct: (stats.activeNow / stats.totalQuizzes) * 100 },
+          { label: 'PARTICIPANTS', val: stats.participantsToday, pct: 72 },
+          { label: 'AVG SCORE', val: `${stats.avgScore}%`, pct: stats.avgScore },
+          { label: 'QUESTIONS ANS.', val: stats.questionsAnswered, pct: 65 },
+          { label: 'TOP CATEGORY', val: stats.topCategory, pct: 80 },
+        ].map((s, i) => (
+          <div key={i} className="q-stat-card">
+            <div className="qsc-head">
+              <span>{s.label}</span>
+              <span className="qsc-val">{s.val}</span>
             </div>
-            <p className="quiz-description">{quiz.description}</p>
-            
-            <div className="quiz-meta">
-              <div>{quiz.questions.length} questions</div>
-              <div>{quiz.timeLimit} min</div>
-              <div>{quiz.participants} participants</div>
-            </div>
-
-            <div className="quiz-categories">
-              {Array.from(new Set(quiz.questions.map(q => q.category))).map(cat => (
-                <span key={cat} className="category-tag">{cat}</span>
-              ))}
-            </div>
-
-            <div className="quiz-footer">
-              <span className="creator">By {quiz.createdBy}</span>
-              <div className="footer-actions">
-                <span className="quiz-code">{quiz.code}</span>
-                <button className="btn btn-primary btn-small" onClick={() => startQuiz(quiz)}>
-                  Start
-                </button>
-              </div>
-            </div>
+            <div className="qsc-bar"><div className="qsc-fill" style={{ width: `${s.pct}%` }} /></div>
           </div>
         ))}
       </div>
 
+      {/* ── MAIN PANEL ── */}
+      <div className="q-main">
+
+        {/* ── SIDEBAR ── */}
+        <aside className="q-sidebar">
+          <div className="q-sb-section">
+            <div className="q-sb-title">NAVIGATION</div>
+            {[
+              { key: 'list', label: 'Quiz List' },
+              { key: 'join', label: 'Join Session' },
+              { key: 'create', label: 'Create Quiz' },
+            ].map(item => (
+              <button key={item.key} className={`q-sb-btn ${view === item.key ? 'q-sb-active' : ''}`}
+                onClick={() => { setView(item.key as any); setStep(1); setQuizDone(false) }}>
+                <span className="q-sb-arrow">{view === item.key ? '▸' : '·'}</span>
+                {item.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Live Quizzes */}
+          <div className="q-sb-section">
+            <div className="q-sb-title">LIVE QUIZZES</div>
+            {quizzes.filter(q => q.status === 'active').map(q => (
+              <div key={q.id} className="q-sb-quiz">
+                <div className="q-sb-quiz-top">
+                  <span className="q-sb-dot" />
+                  <span className="q-sb-qname">{q.title.substring(0, 22)}{q.title.length > 22 ? '...' : ''}</span>
+                </div>
+                <div className="q-sb-qmeta">
+                  <span>{q.participants}/{q.maxParticipants} online</span>
+                  <span className="q-sb-code">{q.code}</span>
+                </div>
+                <div className="q-sb-qbar"><div className="q-sb-qfill" style={{ width: `${(q.participants / q.maxParticipants) * 100}%` }} /></div>
+              </div>
+            ))}
+          </div>
+
+          {/* Activity Log */}
+          <div className="q-sb-section q-sb-log-section">
+            <div className="q-sb-title">ACTIVITY LOG</div>
+            <div className="q-sb-logs">
+              {logs.length === 0 ? <div className="q-sb-log-empty">[Awaiting activity]</div>
+                : logs.map((l, i) => <div key={i} className="q-sb-log">{l}</div>)}
+            </div>
+          </div>
+        </aside>
+
+        {/* ── CONTENT ── */}
+        <div className="q-content">
+
+          {/* ════════════════ LIST VIEW ════════════════ */}
+          {view === 'list' && (
+            <div className="q-list-view">
+              {/* Toolbar */}
+              <div className="q-toolbar">
+                <input className="q-search" placeholder="Search by title or code..." value={search} onChange={e => setSearch(e.target.value)} />
+                <div className="q-toolbar-right">
+                  <div className="q-filters">
+                    {(['all', 'active', 'scheduled', 'ended'] as const).map(f => (
+                      <button key={f} className={`q-fbtn ${filterStatus === f ? 'q-factive' : ''}`} onClick={() => setFilterStatus(f)}>{f.toUpperCase()}</button>
+                    ))}
+                  </div>
+                  <div className="q-filters">
+                    {(['all', 'easy', 'medium', 'hard'] as const).map(f => (
+                      <button key={f} className={`q-fbtn ${filterDiff === f ? 'q-factive' : ''}`} onClick={() => setFilterDiff(f)}>{f.toUpperCase()}</button>
+                    ))}
+                  </div>
+                  <select className="q-cat-sel" value={filterCat} onChange={e => setFilterCat(e.target.value)}>
+                    {categories.map(c => <option key={c} value={c}>{c.toUpperCase()}</option>)}
+                  </select>
+                </div>
+              </div>
+
+              {/* Table */}
+              <div className="q-table-header">
+                <span>TITLE / CATEGORY</span>
+                <span>CODE</span>
+                <span>CREATOR</span>
+                <span>DIFF</span>
+                <span>STATUS</span>
+                <span>USERS</span>
+                <span>QUESTIONS</span>
+                <span>TIME</span>
+                <span>AVG</span>
+                <span>ACTION</span>
+              </div>
+              <div className="q-table-body">
+                {filtered.length === 0 && <div className="q-empty">No quizzes match filters</div>}
+                {filtered.map(q => (
+                  <div key={q.id} className="q-table-row">
+                    <div className="q-row-title">
+                      <span className="q-row-name">{q.title}</span>
+                      <span className="q-row-cat">{q.category}</span>
+                    </div>
+                    <span className="q-row-code">{q.code}{q.isLocked ? ' ⬡' : ''}</span>
+                    <span className="q-row-creator">{q.createdBy}</span>
+                    <span className={`q-diff ${diffClass(q.difficulty)}`}>{q.difficulty.toUpperCase()}</span>
+                    <span className={`q-status ${statClass(q.status)}`}>{q.status.toUpperCase()}</span>
+                    <div className="q-row-users">
+                      <span>{q.participants}/{q.maxParticipants}</span>
+                      <div className="q-mini-bar"><div className="q-mini-fill" style={{ width: `${(q.participants / q.maxParticipants) * 100}%` }} /></div>
+                    </div>
+                    <span>{q.questions.length} Q</span>
+                    <span>{q.timeLimit}m</span>
+                    <span>{q.avgScore > 0 ? `${q.avgScore}%` : '--'}</span>
+                    <div className="q-row-acts">
+                      {q.status !== 'ended' && (
+                        <button className="q-act-join" onClick={() => { setJoinCode(q.code); startQuiz(q) }}>START</button>
+                      )}
+                      <button className="q-act-view" onClick={() => { setJoinCode(q.code); setView('join') }}>JOIN</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div className="q-table-footer">
+                <span>SHOWING {filtered.length} / {quizzes.length} QUIZZES</span>
+                <span>{filtered.filter(q => q.status === 'active').length} ACTIVE</span>
+                <span>TOTAL PARTICIPANTS: {filtered.reduce((s, q) => s + q.participants, 0)}</span>
+              </div>
+            </div>
+          )}
+
+          {/* ════════════════ JOIN VIEW ════════════════ */}
+          {view === 'join' && (
+            <div className="q-join-view">
+              <div className="q-view-title">JOIN QUIZ SESSION</div>
+
+              <div className="q-join-section-title">AVAILABLE SESSIONS ON LAN</div>
+              <div className="q-join-grid">
+                {quizzes.filter(q => q.status !== 'ended').map(q => (
+                  <div key={q.id} className={`q-join-card ${joinCode === q.code ? 'q-join-sel' : ''}`} onClick={() => setJoinCode(q.code)}>
+                    <div className="qjc-top">
+                      <div>
+                        <div className="qjc-title">{q.title}</div>
+                        <div className="qjc-code">{q.code} — {q.isLocked ? 'PRIVATE' : 'PUBLIC'}</div>
+                      </div>
+                      <span className={`q-status ${statClass(q.status)}`}>{q.status.toUpperCase()}</span>
+                    </div>
+                    <div className="qjc-meta">
+                      <div className="qjc-row"><span>CREATOR</span><span>{q.createdBy}</span></div>
+                      <div className="qjc-row"><span>CATEGORY</span><span>{q.category}</span></div>
+                      <div className="qjc-row"><span>QUESTIONS</span><span>{q.questions.length}</span></div>
+                      <div className="qjc-row"><span>TIME LIMIT</span><span>{q.timeLimit}m</span></div>
+                      <div className="qjc-row"><span>DIFFICULTY</span><span className={diffClass(q.difficulty)}>{q.difficulty.toUpperCase()}</span></div>
+                      <div className="qjc-row"><span>PARTICIPANTS</span><span>{q.participants}/{q.maxParticipants}</span></div>
+                    </div>
+                    <div className="qjc-bar"><div className="qjc-fill" style={{ width: `${(q.participants / q.maxParticipants) * 100}%` }} /></div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="q-join-manual">
+                <div className="q-join-section-title">ENTER CODE MANUALLY</div>
+                <div className="q-join-form">
+                  <div className="q-jfield">
+                    <label>SESSION CODE</label>
+                    <input className="q-code-input" placeholder="XXXXXX" value={joinCode} onChange={e => setJoinCode(e.target.value.toUpperCase())} maxLength={6} />
+                  </div>
+                  <div className="q-jfield">
+                    <label>PASSWORD (IF LOCKED)</label>
+                    <input type="password" className="q-code-input q-pass-input" placeholder="••••" value={joinPass} onChange={e => setJoinPass(e.target.value)} />
+                  </div>
+                  <button className="q-join-submit" onClick={handleJoin} disabled={!joinCode.trim()}>JOIN SESSION</button>
+                </div>
+                <div className="q-join-info">
+                  <div className="q-info-row"><span>ENCRYPTION</span><span>AES-256-GCM</span></div>
+                  <div className="q-info-row"><span>NETWORK</span><span>LAN / WebSocket</span></div>
+                  <div className="q-info-row"><span>BLOCKCHAIN</span><span>HASH VERIFIED</span></div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ════════════════ TAKE VIEW ════════════════ */}
+          {view === 'take' && activeQuiz && !quizDone && (
+            <div className="q-take-view">
+              {/* Quiz Header */}
+              <div className="qt-header">
+                <div className="qt-head-left">
+                  <div className="qt-title">{activeQuiz.title}</div>
+                  <div className="qt-meta">
+                    <span className="qt-progress">Q {qIndex + 1} / {activeQuiz.questions.length}</span>
+                    <span className={`q-diff ${diffClass(activeQuiz.questions[qIndex].difficulty)}`}>
+                      {activeQuiz.questions[qIndex].difficulty.toUpperCase()}
+                    </span>
+                    <span className="qt-pts">{activeQuiz.questions[qIndex].points} PTS</span>
+                  </div>
+                </div>
+                <div className="qt-head-right">
+                  <div className="qt-timer-box">
+                    <span className="qt-timer-label">QUIZ TIME</span>
+                    <span className={`qt-timer ${timeLeft < 60 ? 'qt-timer-warn' : ''}`}>{fmtTimer(timeLeft)}</span>
+                  </div>
+                  <div className="qt-timer-box">
+                    <span className="qt-timer-label">QUESTION</span>
+                    <span className={`qt-timer ${questionTimer < 10 ? 'qt-timer-warn' : ''}`}>{questionTimer}s</span>
+                  </div>
+                  <div className="qt-timer-box">
+                    <span className="qt-timer-label">SCORE</span>
+                    <span className="qt-timer">{score}</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Progress Bar */}
+              <div className="qt-prog-bar">
+                <div className="qt-prog-fill" style={{ width: `${((qIndex + 1) / activeQuiz.questions.length) * 100}%` }} />
+              </div>
+              <div className="qt-prog-dots">
+                {activeQuiz.questions.map((_, i) => (
+                  <div key={i} className={`qt-dot ${i < qIndex ? 'qt-dot-done' : i === qIndex ? 'qt-dot-curr' : ''} ${answers[i] !== undefined ? (answers[i] === activeQuiz.questions[i].correctAnswer ? 'qt-dot-correct' : 'qt-dot-wrong') : ''}`} />
+                ))}
+              </div>
+
+              <div className="qt-body">
+                {/* Question */}
+                <div className="qt-question-panel">
+                  <div className="qt-q-text">{activeQuiz.questions[qIndex].question}</div>
+                  <div className="qt-options">
+                    {activeQuiz.questions[qIndex].options.map((opt, i) => {
+                      const selected = answers[qIndex] === i
+                      const correct = activeQuiz.questions[qIndex].correctAnswer === i
+                      let cls = 'qt-opt'
+                      if (revealed) {
+                        if (correct) cls += ' qt-opt-correct'
+                        else if (selected) cls += ' qt-opt-wrong'
+                      } else if (selected) {
+                        cls += ' qt-opt-selected'
+                      }
+                      return (
+                        <button key={i} className={cls} onClick={() => handleAnswer(i)} disabled={revealed || answers[qIndex] !== undefined}>
+                          <span className="qt-opt-letter">{String.fromCharCode(65 + i)}</span>
+                          <span className="qt-opt-text">{opt}</span>
+                          {revealed && correct && <span className="qt-opt-check">CORRECT</span>}
+                          {revealed && selected && !correct && <span className="qt-opt-x">WRONG</span>}
+                        </button>
+                      )
+                    })}
+                  </div>
+
+                  {revealed && activeQuiz.questions[qIndex].explanation && (
+                    <div className="qt-explanation">
+                      <span className="qt-expl-label">EXPLANATION</span>
+                      <span>{activeQuiz.questions[qIndex].explanation}</span>
+                    </div>
+                  )}
+
+                  <div className="qt-nav">
+                    <button className="qt-nav-btn secondary" onClick={() => { if (qIndex > 0) { setQIndex(i => i - 1); setRevealed(answers[qIndex - 1] !== undefined) } }} disabled={qIndex === 0}>
+                      PREVIOUS
+                    </button>
+                    <button className="qt-nav-btn primary" onClick={nextQ} disabled={!revealed && answers[qIndex] === undefined}>
+                      {qIndex === activeQuiz.questions.length - 1 ? 'FINISH' : 'NEXT'}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Live Leaderboard Sidebar */}
+                <div className="qt-live-board">
+                  <div className="qt-lb-title">LIVE LEADERBOARD</div>
+                  {liveBoard.sort((a, b) => b.score - a.score).map((p, i) => (
+                    <div key={p.id} className={`qt-lb-row ${p.id === 'me' ? 'qt-lb-me' : ''}`}>
+                      <span className="qt-lb-rank">#{i + 1}</span>
+                      <div className="qt-lb-info">
+                        <span className="qt-lb-name">{p.name}</span>
+                        <span className="qt-lb-prog">{p.answered}/{p.total} answered</span>
+                      </div>
+                      <span className="qt-lb-score">{p.score}</span>
+                    </div>
+                  ))}
+                  <div className="qt-lb-net">
+                    <div className="qt-lb-net-row"><span>QUESTIONS</span><span>{activeQuiz.questions.length}</span></div>
+                    <div className="qt-lb-net-row"><span>CATEGORY</span><span>{activeQuiz.category}</span></div>
+                    <div className="qt-lb-net-row"><span>DIFFICULTY</span><span className={diffClass(activeQuiz.difficulty)}>{activeQuiz.difficulty.toUpperCase()}</span></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ════════════════ RESULTS VIEW ════════════════ */}
+          {view === 'results' && activeQuiz && (
+            <div className="q-results-view">
+              <div className="q-view-title">QUIZ RESULTS</div>
+
+              {/* Score Banner */}
+              <div className="qr-banner">
+                <div className="qr-score-wrap">
+                  <div className="qr-score-circle">
+                    <span className="qr-score-val">{score}</span>
+                    <span className="qr-score-total">/ {activeQuiz.questions.reduce((s, q) => s + q.points, 0)}</span>
+                  </div>
+                  <div className="qr-score-pct">
+                    {Math.round((score / activeQuiz.questions.reduce((s, q) => s + q.points, 0)) * 100)}%
+                  </div>
+                </div>
+                <div className="qr-stats">
+                  <div className="qr-stat"><span>CORRECT</span><span>{answers.filter((a, i) => a === activeQuiz.questions[i].correctAnswer).length}</span></div>
+                  <div className="qr-stat"><span>WRONG</span><span>{answers.filter((a, i) => a !== activeQuiz.questions[i].correctAnswer && a !== undefined).length}</span></div>
+                  <div className="qr-stat"><span>SKIPPED</span><span>{activeQuiz.questions.length - answers.filter(a => a !== undefined).length}</span></div>
+                  <div className="qr-stat"><span>TOTAL Q</span><span>{activeQuiz.questions.length}</span></div>
+                  <div className="qr-stat"><span>POINTS</span><span>{score}</span></div>
+                  <div className="qr-stat"><span>TIME USED</span><span>{fmtTimer(activeQuiz.timeLimit * 60 - timeLeft)}</span></div>
+                </div>
+              </div>
+
+              {/* Per-question breakdown */}
+              <div className="qr-breakdown-title">QUESTION BREAKDOWN</div>
+              <div className="qr-breakdown">
+                {activeQuiz.questions.map((q, i) => {
+                  const userAns = answers[i]
+                  const correct = userAns === q.correctAnswer
+                  const skipped = userAns === undefined
+                  return (
+                    <div key={q.id} className={`qr-q-row ${correct ? 'qr-correct' : skipped ? 'qr-skipped' : 'qr-wrong'}`}>
+                      <div className="qr-q-num">Q{i + 1}</div>
+                      <div className="qr-q-info">
+                        <div className="qr-q-text">{q.question}</div>
+                        <div className="qr-q-ans">
+                          <span>YOUR ANSWER: {userAns !== undefined ? q.options[userAns] : 'SKIPPED'}</span>
+                          <span className="qr-correct-ans">CORRECT: {q.options[q.correctAnswer]}</span>
+                        </div>
+                        {q.explanation && <div className="qr-expl">{q.explanation}</div>}
+                      </div>
+                      <div className="qr-q-right">
+                        <span className={`qr-result ${correct ? 'qr-c' : skipped ? 'qr-s' : 'qr-w'}`}>
+                          {correct ? 'CORRECT' : skipped ? 'SKIPPED' : 'WRONG'}
+                        </span>
+                        <span className="qr-q-pts">{correct ? `+${q.points}` : '0'}</span>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+
+              {/* Final Leaderboard */}
+              <div className="qr-lb-title">FINAL LEADERBOARD</div>
+              <div className="qr-lb">
+                {liveBoard.sort((a, b) => b.score - a.score).map((p, i) => (
+                  <div key={p.id} className={`qr-lb-row ${p.id === 'me' ? 'qr-lb-me' : ''}`}>
+                    <span className="qr-lb-rank">#{i + 1}</span>
+                    <span className="qr-lb-name">{p.name}</span>
+                    <div className="qr-lb-bar-wrap">
+                      <div className="qr-lb-bar">
+                        <div className="qr-lb-fill" style={{ width: `${(p.score / (activeQuiz.questions.reduce((s, q) => s + q.points, 0))) * 100}%` }} />
+                      </div>
+                    </div>
+                    <span className="qr-lb-score">{p.score} pts</span>
+                    <span className={`qr-lb-status ${p.status === 'completed' ? 'qr-done' : ''}`}>{p.status.toUpperCase()}</span>
+                  </div>
+                ))}
+              </div>
+
+              <div className="qr-actions">
+                <button className="qr-btn primary" onClick={() => { startQuiz(activeQuiz) }}>RETRY QUIZ</button>
+                <button className="qr-btn secondary" onClick={() => setView('list')}>BACK TO LIST</button>
+              </div>
+            </div>
+          )}
+
+          {/* ════════════════ CREATE VIEW ════════════════ */}
+          {view === 'create' && (
+            <div className="q-create-view">
+              <div className="q-view-title">CREATE QUIZ</div>
+
+              {/* Steps */}
+              <div className="q-steps">
+                {[{ n: 1, l: 'BASIC INFO' }, { n: 2, l: 'QUESTIONS' }, { n: 3, l: 'SETTINGS' }, { n: 4, l: 'PUBLISHED' }].map(s => (
+                  <div key={s.n} className={`q-step ${step >= s.n ? 'q-step-done' : ''} ${step === s.n ? 'q-step-active' : ''}`}>
+                    <div className="q-step-num">{s.n}</div>
+                    <div className="q-step-label">{s.l}</div>
+                    {s.n < 4 && <div className="q-step-line" />}
+                  </div>
+                ))}
+              </div>
+
+              {/* ── Step 1 ── */}
+              {step === 1 && (
+                <div className="q-step-body">
+                  <div className="q-form-grid">
+                    <div className="q-field">
+                      <label>QUIZ TITLE</label>
+                      <input className="q-input" value={draftTitle} onChange={e => setDraftTitle(e.target.value)} placeholder="e.g., JavaScript Fundamentals" />
+                    </div>
+                    <div className="q-field">
+                      <label>CATEGORY</label>
+                      <select className="q-input" value={draftCategory} onChange={e => setDraftCategory(e.target.value)}>
+                        {['General', 'Algorithms', 'Data Structures', 'Web Dev', 'Databases', 'OOP', 'Networks', 'OS'].map(c => (
+                          <option key={c} value={c}>{c}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="q-field q-field-full">
+                      <label>DESCRIPTION</label>
+                      <textarea className="q-input q-textarea" rows={2} value={draftDesc} onChange={e => setDraftDesc(e.target.value)} placeholder="Brief description..." />
+                    </div>
+                    <div className="q-field">
+                      <label>TIME LIMIT (MINUTES)</label>
+                      <input className="q-input" type="number" min={1} max={120} value={draftTimeLimit} onChange={e => setDraftTimeLimit(+e.target.value)} />
+                    </div>
+                    <div className="q-field">
+                      <label>MAX PARTICIPANTS</label>
+                      <input className="q-input" type="number" min={1} max={200} value={draftMaxPart} onChange={e => setDraftMaxPart(+e.target.value)} />
+                    </div>
+                    <div className="q-field">
+                      <label>DIFFICULTY</label>
+                      <select className="q-input" value={draftDiff} onChange={e => setDraftDiff(e.target.value as any)}>
+                        <option value="easy">EASY</option>
+                        <option value="medium">MEDIUM</option>
+                        <option value="hard">HARD</option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* ── Step 2 ── */}
+              {step === 2 && (
+                <div className="q-step-body q-q-layout">
+                  <div className="q-q-list">
+                    <div className="q-ql-title">QUESTIONS ({questions.length})</div>
+                    {questions.length === 0 && <div className="q-ql-empty">No questions yet</div>}
+                    {questions.map((q, i) => (
+                      <div key={q.id} className="q-ql-item">
+                        <span className="q-ql-num">Q{i + 1}</span>
+                        <div className="q-ql-info">
+                          <div className="q-ql-text">{q.question.substring(0, 36)}{q.question.length > 36 ? '...' : ''}</div>
+                          <div className="q-ql-meta">
+                            <span className={diffClass(q.difficulty)}>{q.difficulty.toUpperCase()}</span>
+                            <span>{q.points}pts</span>
+                          </div>
+                        </div>
+                        <button className="q-ql-rm" onClick={() => setQuestions(p => p.filter(qq => qq.id !== q.id))}>×</button>
+                      </div>
+                    ))}
+                    {questions.length > 0 && (
+                      <div className="q-ql-sum">
+                        <span>{questions.length} Q</span>
+                        <span>{questions.reduce((s, q) => s + q.points, 0)} pts total</span>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="q-q-editor">
+                    <div className="q-ql-title">ADD QUESTION</div>
+                    <div className="q-form-grid">
+                      <div className="q-field">
+                        <label>DIFFICULTY</label>
+                        <select className="q-input" value={editQ.difficulty} onChange={e => setEditQ({ ...editQ, difficulty: e.target.value as any })}>
+                          <option value="easy">EASY</option>
+                          <option value="medium">MEDIUM</option>
+                          <option value="hard">HARD</option>
+                        </select>
+                      </div>
+                      <div className="q-field">
+                        <label>POINTS</label>
+                        <input className="q-input" type="number" min={1} max={50} value={editQ.points} onChange={e => setEditQ({ ...editQ, points: +e.target.value })} />
+                      </div>
+                      <div className="q-field">
+                        <label>CATEGORY</label>
+                        <input className="q-input" value={editQ.category} onChange={e => setEditQ({ ...editQ, category: e.target.value })} placeholder="e.g., algorithms" />
+                      </div>
+                      <div className="q-field q-field-full">
+                        <label>QUESTION</label>
+                        <textarea className="q-input q-textarea" rows={2} value={editQ.question} onChange={e => setEditQ({ ...editQ, question: e.target.value })} placeholder="Enter your question..." />
+                      </div>
+                    </div>
+
+                    <div className="q-opts-section">
+                      <div className="q-ql-title">OPTIONS — SELECT CORRECT ANSWER</div>
+                      {editQ.options.map((opt, i) => (
+                        <div key={i} className="q-opt-row">
+                          <input type="radio" name="correct" className="q-radio" checked={editQ.correctAnswer === i} onChange={() => setEditQ({ ...editQ, correctAnswer: i })} />
+                          <span className="q-opt-label">{String.fromCharCode(65 + i)}</span>
+                          <input className="q-input q-opt-inp" value={opt} placeholder={`Option ${String.fromCharCode(65 + i)}`} onChange={e => {
+                            const opts = [...editQ.options]; opts[i] = e.target.value
+                            setEditQ({ ...editQ, options: opts })
+                          }} />
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="q-field" style={{ marginTop: 10 }}>
+                      <label>EXPLANATION (OPTIONAL)</label>
+                      <input className="q-input" value={editQ.explanation || ''} onChange={e => setEditQ({ ...editQ, explanation: e.target.value })} placeholder="Explain the correct answer..." />
+                    </div>
+                    <button className="q-add-q-btn" onClick={addQuestion} disabled={!editQ.question.trim()}>+ ADD QUESTION</button>
+                  </div>
+                </div>
+              )}
+
+              {/* ── Step 3 ── */}
+              {step === 3 && (
+                <div className="q-step-body">
+                  <div className="q-settings-grid">
+                    {[
+                      { label: 'SHUFFLE QUESTIONS', sub: 'Randomize question order per student', val: draftShuffle, set: setDraftShuffle },
+                      { label: 'SHUFFLE OPTIONS', sub: 'Randomize MCQ option order', val: draftShuffleOpts, set: setDraftShuffleOpts },
+                      { label: 'LOCKED SESSION', sub: 'Require password to join', val: draftLocked, set: setDraftLocked },
+                      { label: 'SHOW EXPLANATION', sub: 'Display explanation after each answer', val: draftShowExpl, set: setDraftShowExpl },
+                      { label: 'INSTANT REVEAL', sub: 'Show correct answer immediately after selection', val: draftInstant, set: setDraftInstant },
+                    ].map(s => (
+                      <div key={s.label} className="q-setting-card">
+                        <div className="q-sc-info">
+                          <div className="q-sc-label">{s.label}</div>
+                          <div className="q-sc-sub">{s.sub}</div>
+                        </div>
+                        <button className={`q-toggle ${s.val ? 'q-toggle-on' : ''}`} onClick={() => s.set(!s.val)}>
+                          <span className="q-toggle-knob" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="q-review-panel" style={{ marginTop: 14 }}>
+                    <div className="q-pd-title">REVIEW BEFORE PUBLISHING</div>
+                    {[
+                      ['TITLE', draftTitle || '(not set)'],
+                      ['CATEGORY', draftCategory],
+                      ['DIFFICULTY', draftDiff.toUpperCase()],
+                      ['TIME LIMIT', `${draftTimeLimit} minutes`],
+                      ['MAX PARTICIPANTS', draftMaxPart.toString()],
+                      ['QUESTIONS', questions.length.toString()],
+                      ['TOTAL POINTS', questions.reduce((s, q) => s + q.points, 0).toString()],
+                      ['LOCKED', draftLocked ? 'YES — PASSWORD PROTECTED' : 'NO — OPEN'],
+                    ].map(([k, v]) => (
+                      <div key={k} className="q-pd-row"><span>{k}</span><span>{v}</span></div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* ── Step 4: Published ── */}
+              {step === 4 && (
+                <div className="q-step-body q-published">
+                  <div className="q-pub-title">QUIZ PUBLISHED</div>
+                  <div className="q-pub-sub">Share these credentials with your students</div>
+                  <div className="q-pub-creds">
+                    <div className="q-pub-cred">
+                      <span>SESSION CODE</span>
+                      <span className="q-pub-code">{genCode}</span>
+                    </div>
+                    {genPass && (
+                      <div className="q-pub-cred">
+                        <span>PASSWORD</span>
+                        <span className="q-pub-pass">{genPass}</span>
+                      </div>
+                    )}
+                  </div>
+                  <div className="q-pub-details">
+                    <div className="q-pd-row"><span>TITLE</span><span>{draftTitle}</span></div>
+                    <div className="q-pd-row"><span>QUESTIONS</span><span>{questions.length}</span></div>
+                    <div className="q-pd-row"><span>TOTAL POINTS</span><span>{questions.reduce((s, q) => s + q.points, 0)}</span></div>
+                    <div className="q-pd-row"><span>TIME LIMIT</span><span>{draftTimeLimit} min</span></div>
+                  </div>
+                  <div className="q-pub-acts">
+                    <button className="qr-btn primary" onClick={() => { setView('list'); setStep(1) }}>VIEW IN LIST</button>
+                    <button className="qr-btn secondary" onClick={() => { setStep(1); setDraftTitle(''); setDraftDesc(''); setQuestions([]) }}>CREATE ANOTHER</button>
+                  </div>
+                </div>
+              )}
+
+              {/* Step Nav */}
+              {step < 4 && (
+                <div className="q-step-nav">
+                  <button className="q-nav-btn secondary" onClick={() => setStep(s => s - 1)} disabled={step === 1}>PREVIOUS</button>
+                  <div className="q-step-indicator">STEP {step} / 3</div>
+                  {step < 3 ? (
+                    <button className="q-nav-btn primary" onClick={() => setStep(s => s + 1)} disabled={step === 1 && !draftTitle.trim()}>NEXT</button>
+                  ) : (
+                    <button className="q-nav-btn primary" onClick={handleCreate} disabled={!draftTitle.trim() || questions.length === 0}>PUBLISH QUIZ</button>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+        </div>
+      </div>
+
+      {/* Scan line */}
+      <div className="q-scan-line" />
+
+      {/* ══════════════════ STYLES ══════════════════ */}
       <style>{`
-        .quiz-system {
-          max-width: 1100px;
-          margin: 0 auto;
-          padding: 1rem;
-        }
+        * { margin:0; padding:0; box-sizing:border-box; }
 
-        .quiz-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          margin-bottom: 2rem;
-        }
-
-        .quiz-header h1 {
-          font-size: 1.5rem;
+        .qroot {
+          min-height: calc(100vh - 56px);
+          background: #030303;
           color: #ffffff;
-        }
-
-        .quiz-stats {
+          font-family: 'SF Mono','Monaco','Fira Code',monospace;
+          font-size: 11px;
           display: flex;
-          gap: 1rem;
-          color: #999999;
-          font-size: 0.9rem;
+          flex-direction: column;
+          gap: 1px;
+          position: relative;
+          overflow-x: hidden;
+          overflow-y: auto;
         }
+        .qroot::-webkit-scrollbar{width:4px}
+        .qroot::-webkit-scrollbar-track{background:#111}
+        .qroot::-webkit-scrollbar-thumb{background:#222}
+        .qroot::-webkit-scrollbar-thumb:hover{background:#1e3a5f}
+        *{scrollbar-width:thin;scrollbar-color:#222 #111}
 
-        .header-actions {
-          display: flex;
-          gap: 0.8rem;
+        /* ── PAGE HEADER ── */
+        .q-page-header {
+          background:#0a0a0a; border:1px solid #1e3a5f;
+          padding:12px 20px; display:flex; justify-content:space-between; align-items:center;
+          position:relative; overflow:hidden; flex-shrink:0;
         }
-
-        .quiz-filters {
-          display: flex;
-          gap: 1rem;
-          margin-bottom: 2rem;
+        .q-page-header::before {
+          content:''; position:absolute; top:0; left:-100%; width:100%; height:2px;
+          background:linear-gradient(90deg,transparent,#1e3a5f,transparent);
+          animation:qscanline 3s linear infinite;
         }
+        @keyframes qscanline{0%{left:-100%}100%{left:100%}}
+        .q-page-title{display:flex;flex-direction:column;gap:3px}
+        .q-title-text{color:#1e3a5f;font-size:18px;font-weight:700;letter-spacing:3px;text-shadow:0 0 8px #1e3a5f}
+        .q-title-sub{font-size:8px;opacity:0.35;letter-spacing:2px}
+        .q-page-meta{display:flex;align-items:center;gap:14px;background:#050505;padding:6px 12px;border:1px solid #1e3a5f}
+        .q-version{color:#1e3a5f;font-size:9px}
+        .q-time{font-size:10px}
+        .q-log-box{border-left:1px solid #1e3a5f;padding-left:12px}
+        .q-log-line{font-size:9px;opacity:0.7;animation:qfadeIn 0.3s ease}
+        @keyframes qfadeIn{from{opacity:0;transform:translateX(8px)}to{opacity:1;transform:translateX(0)}}
 
-        .search-bar {
-          flex: 1;
-          display: flex;
-          align-items: center;
-          background: #1a1a1a;
-          border: 1px solid #2a2a2a;
-          border-radius: 4px;
-          padding: 0 0.8rem;
-        }
+        /* ── STATS ── */
+        .q-stats-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:1px;background:#1e3a5f;border:1px solid #1e3a5f;flex-shrink:0}
+        .q-stat-card{background:#0a0a0a;padding:12px 14px;display:flex;flex-direction:column;gap:6px;transition:transform 0.2s,box-shadow 0.2s}
+        .q-stat-card:hover{transform:translateY(-2px);box-shadow:0 4px 18px rgba(30,58,95,0.3)}
+        .qsc-head{display:flex;justify-content:space-between;align-items:center;padding-bottom:5px;border-bottom:1px solid #1e3a5f}
+        .qsc-head span:first-child{font-size:9px;opacity:0.6;letter-spacing:0.5px}
+        .qsc-val{font-size:14px;font-weight:700}
+        .qsc-bar{height:2px;background:#1a1a1a;overflow:hidden}
+        .qsc-fill{height:100%;background:#1e3a5f;transition:width 0.5s}
 
-        .search-bar input {
-          flex: 1;
-          background: none;
-          border: none;
-          padding: 0.6rem;
-          color: #ffffff;
-          outline: none;
-          font-size: 0.9rem;
-        }
+        /* ── MAIN ── */
+        .q-main{display:flex;flex:1;gap:1px;background:#1e3a5f;border:1px solid #1e3a5f;min-height:0}
 
-        .search-icon {
-          color: #ffffff;
-          font-size: 0.9rem;
-        }
+        /* ── SIDEBAR ── */
+        .q-sidebar{width:260px;min-width:260px;background:#0a0a0a;display:flex;flex-direction:column;overflow-y:auto}
+        .q-sidebar::-webkit-scrollbar{width:4px}
+        .q-sidebar::-webkit-scrollbar-track{background:#111}
+        .q-sidebar::-webkit-scrollbar-thumb{background:#222}
+        .q-sidebar::-webkit-scrollbar-thumb:hover{background:#1e3a5f}
+        .q-sb-section{padding:12px 14px;border-bottom:1px solid #1e3a5f;flex-shrink:0}
+        .q-sb-title{font-size:7px;letter-spacing:1.5px;opacity:0.35;margin-bottom:8px}
+        .q-sb-btn{width:100%;background:none;border:none;color:#fff;font-family:inherit;font-size:10px;padding:7px 0;text-align:left;cursor:pointer;opacity:0.5;display:flex;align-items:center;gap:7px;transition:opacity 0.15s;border-bottom:1px dotted #111}
+        .q-sb-btn:hover{opacity:0.85}
+        .q-sb-btn.q-sb-active{opacity:1}
+        .q-sb-arrow{color:#1e3a5f;font-size:10px;width:10px}
+        .q-sb-quiz{padding:6px 0;border-bottom:1px dotted #111}
+        .q-sb-quiz-top{display:flex;align-items:center;gap:6px;margin-bottom:3px}
+        .q-sb-dot{width:5px;height:5px;border-radius:50%;background:#4a90d9;flex-shrink:0;animation:qdot 2s infinite}
+        @keyframes qdot{0%,100%{opacity:1}50%{opacity:0.3}}
+        .q-sb-qname{font-size:9px}
+        .q-sb-qmeta{display:flex;justify-content:space-between;font-size:7px;opacity:0.45;margin-bottom:3px}
+        .q-sb-code{color:#6ab4ff}
+        .q-sb-qbar{height:2px;background:#111}
+        .q-sb-qfill{height:100%;background:#1e3a5f;transition:width 0.5s}
+        .q-sb-log-section{flex:1}
+        .q-sb-logs{display:flex;flex-direction:column;gap:2px;max-height:160px;overflow-y:auto}
+        .q-sb-log{font-size:8px;opacity:0.5;padding:2px 0;border-bottom:1px dotted #0d0d0d;font-family:monospace}
+        .q-sb-log-empty{font-size:8px;opacity:0.2;font-style:italic}
 
-        .quiz-filters select {
-          background: #1a1a1a;
-          border: 1px solid #2a2a2a;
-          color: #ffffff;
-          padding: 0.5rem;
-          border-radius: 4px;
-          font-size: 0.9rem;
-        }
+        /* ── CONTENT ── */
+        .q-content{flex:1;background:#0a0a0a;overflow-y:auto;padding:20px;min-width:0}
+        .q-content::-webkit-scrollbar{width:4px}
+        .q-content::-webkit-scrollbar-track{background:#111}
+        .q-content::-webkit-scrollbar-thumb{background:#222}
+        .q-content::-webkit-scrollbar-thumb:hover{background:#1e3a5f}
+        .q-view-title{font-size:13px;font-weight:700;letter-spacing:2px;margin-bottom:16px;border-left:3px solid #1e3a5f;padding-left:10px}
 
-        .quizzes-grid {
-          display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-          gap: 1rem;
-        }
+        /* ── TOOLBAR ── */
+        .q-toolbar{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap}
+        .q-toolbar-right{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+        .q-search{background:#0e0e0e;border:1px solid #1e3a5f;color:#fff;padding:6px 12px;font-size:10px;font-family:inherit;outline:none;width:220px;transition:border-color 0.2s}
+        .q-search:focus{border-color:rgba(255,255,255,0.3)}
+        .q-search::placeholder{opacity:0.28}
+        .q-filters{display:flex;gap:3px}
+        .q-fbtn{background:none;border:1px solid #141414;color:#fff;opacity:0.4;font-size:7px;padding:3px 8px;cursor:pointer;font-family:inherit;letter-spacing:0.5px;transition:all 0.15s}
+        .q-fbtn:hover{opacity:0.75}
+        .q-fbtn.q-factive{opacity:1;border-color:#1e3a5f;background:rgba(30,58,95,0.18)}
+        .q-cat-sel{background:#0e0e0e;border:1px solid #1a1a1a;color:#fff;padding:3px 8px;font-size:8px;font-family:inherit;outline:none;cursor:pointer}
 
-        .quiz-card {
-          background: #1a1a1a;
-          border: 1px solid #2a2a2a;
-          border-radius: 6px;
-          padding: 1.2rem;
-          transition: all 0.2s ease;
-        }
+        /* ── TABLE ── */
+        .q-table-header{display:grid;grid-template-columns:2fr 80px 100px 60px 80px 90px 60px 50px 50px 90px;padding:6px 10px;background:#070707;border:1px solid #1e3a5f;border-bottom:none;font-size:7px;letter-spacing:1px;opacity:0.45}
+        .q-table-body{border:1px solid #1e3a5f}
+        .q-table-row{display:grid;grid-template-columns:2fr 80px 100px 60px 80px 90px 60px 50px 50px 90px;padding:9px 10px;border-bottom:1px solid #0d0d0d;align-items:center;font-size:9px;transition:background 0.15s}
+        .q-table-row:hover{background:#0e0e0e}
+        .q-table-row:last-child{border-bottom:none}
+        .q-empty{padding:30px;text-align:center;opacity:0.25;font-size:10px}
+        .q-row-title{display:flex;flex-direction:column;gap:2px}
+        .q-row-name{font-size:10px}
+        .q-row-cat{font-size:7px;opacity:0.35}
+        .q-row-code{font-family:monospace;font-size:9px;opacity:0.75}
+        .q-row-creator{font-size:8px;opacity:0.6}
+        .q-diff{font-size:7px;padding:2px 5px}
+        .diff-easy{background:rgba(74,144,80,0.25);color:#6dba72}
+        .diff-med{background:rgba(200,150,50,0.2);color:#c8964a}
+        .diff-hard{background:rgba(180,60,60,0.2);color:#c86060}
+        .q-status{font-size:7px;padding:2px 5px}
+        .stat-active{background:rgba(30,58,95,0.4);color:#6ab4ff}
+        .stat-sched{background:rgba(200,150,50,0.2);color:#c8964a}
+        .stat-ended{background:rgba(80,80,80,0.3);color:#888}
+        .q-row-users{display:flex;flex-direction:column;gap:2px}
+        .q-mini-bar{height:2px;background:#1a1a1a}
+        .q-mini-fill{height:100%;background:#1e3a5f}
+        .q-row-acts{display:flex;gap:5px}
+        .q-act-join,.q-act-view{background:none;border:1px solid #1a1a1a;color:#fff;font-size:7px;padding:3px 7px;cursor:pointer;font-family:inherit;letter-spacing:0.5px;transition:all 0.15s}
+        .q-act-join{background:#1e3a5f;border-color:#1e3a5f}
+        .q-act-join:hover{background:#2a4a7a}
+        .q-act-view:hover{border-color:#1e3a5f;background:rgba(30,58,95,0.2)}
+        .q-table-footer{display:flex;gap:24px;padding:6px 10px;background:#070707;border:1px solid #1e3a5f;border-top:none;font-size:7px;opacity:0.35;letter-spacing:0.5px}
 
-        .quiz-card:hover {
-          border-color: #1e3a5f;
-        }
+        /* ── JOIN VIEW ── */
+        .q-join-view{display:flex;flex-direction:column;gap:16px}
+        .q-join-section-title{font-size:8px;letter-spacing:1.5px;opacity:0.35;margin-bottom:8px}
+        .q-join-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:4px}
+        .q-join-card{background:#0e0e0e;border:1px solid #1a1a1a;padding:12px;cursor:pointer;transition:border-color 0.15s}
+        .q-join-card:hover{border-color:#1e3a5f}
+        .q-join-sel{border-color:#1e3a5f!important;background:rgba(30,58,95,0.1)}
+        .qjc-top{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px}
+        .qjc-title{font-size:10px;font-weight:600;margin-bottom:2px}
+        .qjc-code{font-size:7px;opacity:0.4;font-family:monospace}
+        .qjc-meta{display:flex;flex-direction:column;gap:2px;margin-bottom:6px}
+        .qjc-row{display:flex;justify-content:space-between;font-size:7px;padding:2px 0;border-bottom:1px dotted #0d0d0d}
+        .qjc-row span:first-child{opacity:0.4}
+        .qjc-bar{height:2px;background:#1a1a1a}
+        .qjc-fill{height:100%;background:#1e3a5f;transition:width 0.5s}
+        .q-join-manual{display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:16px;background:#070707;border:1px solid #1e3a5f}
+        .q-join-form{display:flex;flex-direction:column;gap:10px}
+        .q-jfield{display:flex;flex-direction:column;gap:4px}
+        .q-jfield label{font-size:7px;opacity:0.45;letter-spacing:1px}
+        .q-code-input{background:#0e0e0e;border:1px solid #1e3a5f;color:#fff;padding:9px 12px;font-size:14px;font-family:monospace;letter-spacing:4px;text-align:center;outline:none;width:100%}
+        .q-code-input:focus{border-color:#fff}
+        .q-pass-input{font-size:12px;letter-spacing:2px}
+        .q-join-submit{background:#1e3a5f;border:none;color:#fff;padding:10px;font-size:10px;cursor:pointer;font-family:inherit;letter-spacing:1px;transition:background 0.2s;margin-top:4px}
+        .q-join-submit:hover:not(:disabled){background:#2a4a7a}
+        .q-join-submit:disabled{opacity:0.35;cursor:not-allowed}
+        .q-join-info{display:flex;flex-direction:column;gap:4px;justify-content:center}
+        .q-info-row{display:flex;justify-content:space-between;font-size:8px;padding:4px 0;border-bottom:1px dotted #111}
+        .q-info-row span:first-child{opacity:0.4}
 
-        .quiz-card-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          margin-bottom: 0.5rem;
-        }
+        /* ── TAKE VIEW ── */
+        .q-take-view{display:flex;flex-direction:column;gap:12px}
+        .qt-header{display:flex;justify-content:space-between;align-items:flex-start;padding:12px 14px;background:#070707;border:1px solid #1e3a5f}
+        .qt-title{font-size:13px;font-weight:700;margin-bottom:4px}
+        .qt-meta{display:flex;align-items:center;gap:10px;font-size:8px}
+        .qt-progress{opacity:0.5}
+        .qt-pts{color:#6ab4ff}
+        .qt-head-right{display:flex;gap:12px}
+        .qt-timer-box{display:flex;flex-direction:column;align-items:flex-end}
+        .qt-timer-label{font-size:7px;opacity:0.35}
+        .qt-timer{font-size:14px;font-weight:700;font-family:monospace}
+        .qt-timer-warn{color:#c86060;animation:qdot 0.5s infinite}
+        .qt-prog-bar{height:3px;background:#111;overflow:hidden}
+        .qt-prog-fill{height:100%;background:#1e3a5f;transition:width 0.3s}
+        .qt-prog-dots{display:flex;gap:4px;padding:6px 0}
+        .qt-dot{width:8px;height:8px;border-radius:50%;background:#111;border:1px solid #1a1a1a;flex-shrink:0}
+        .qt-dot-curr{border-color:#1e3a5f;background:rgba(30,58,95,0.4)}
+        .qt-dot-done{border-color:#333;background:#1a1a1a}
+        .qt-dot-correct{border-color:#6dba72;background:rgba(74,144,80,0.3)}
+        .qt-dot-wrong{border-color:#c86060;background:rgba(180,60,60,0.3)}
+        .qt-body{display:grid;grid-template-columns:1fr 240px;gap:12px}
+        .qt-question-panel{background:#090909;border:1px solid #1e3a5f;padding:16px;display:flex;flex-direction:column;gap:12px}
+        .qt-q-text{font-size:13px;line-height:1.6;font-weight:500}
+        .qt-options{display:flex;flex-direction:column;gap:6px}
+        .qt-opt{display:flex;align-items:center;gap:10px;padding:10px 14px;background:#0e0e0e;border:1px solid #1a1a1a;color:#fff;cursor:pointer;font-family:inherit;font-size:10px;text-align:left;transition:all 0.15s}
+        .qt-opt:hover:not(:disabled){border-color:#1e3a5f;background:#111}
+        .qt-opt:disabled{cursor:default}
+        .qt-opt-selected{background:rgba(30,58,95,0.3)!important;border-color:#1e3a5f!important}
+        .qt-opt-correct{background:rgba(74,144,80,0.2)!important;border-color:#6dba72!important}
+        .qt-opt-wrong{background:rgba(180,60,60,0.15)!important;border-color:#c86060!important;opacity:0.7}
+        .qt-opt-letter{width:22px;height:22px;border-radius:50%;background:#111;border:1px solid #222;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;flex-shrink:0}
+        .qt-opt-text{flex:1}
+        .qt-opt-check{margin-left:auto;font-size:7px;color:#6dba72;letter-spacing:0.5px}
+        .qt-opt-x{margin-left:auto;font-size:7px;color:#c86060;letter-spacing:0.5px}
+        .qt-explanation{background:#070707;border-left:2px solid #1e3a5f;padding:8px 12px;font-size:9px;opacity:0.75;line-height:1.5}
+        .qt-expl-label{display:block;font-size:7px;opacity:0.4;letter-spacing:1px;margin-bottom:4px}
+        .qt-nav{display:flex;justify-content:space-between;margin-top:4px}
+        .qt-nav-btn{padding:8px 24px;font-size:9px;cursor:pointer;font-family:inherit;letter-spacing:1px;transition:all 0.2s}
+        .qt-nav-btn.primary{background:#1e3a5f;border:none;color:#fff}
+        .qt-nav-btn.primary:hover:not(:disabled){background:#2a4a7a}
+        .qt-nav-btn.secondary{background:none;border:1px solid #1a1a1a;color:#fff}
+        .qt-nav-btn.secondary:hover:not(:disabled){border-color:#1e3a5f}
+        .qt-nav-btn:disabled{opacity:0.3;cursor:not-allowed}
+        .qt-live-board{background:#090909;border:1px solid #1e3a5f;padding:12px;display:flex;flex-direction:column;gap:6px}
+        .qt-lb-title{font-size:7px;letter-spacing:1.5px;opacity:0.35;margin-bottom:4px}
+        .qt-lb-row{display:flex;align-items:center;gap:8px;padding:5px;border-bottom:1px dotted #0d0d0d}
+        .qt-lb-me{background:rgba(30,58,95,0.12);border-color:#1e3a5f}
+        .qt-lb-rank{font-size:9px;opacity:0.5;width:20px;flex-shrink:0}
+        .qt-lb-info{flex:1}
+        .qt-lb-name{display:block;font-size:9px}
+        .qt-lb-prog{font-size:7px;opacity:0.4}
+        .qt-lb-score{font-size:11px;font-weight:700;color:#6ab4ff}
+        .qt-lb-net{margin-top:8px;padding-top:8px;border-top:1px solid #111;display:flex;flex-direction:column;gap:3px}
+        .qt-lb-net-row{display:flex;justify-content:space-between;font-size:7px;opacity:0.45}
 
-        .quiz-card-header h3 {
-          font-size: 1.1rem;
-          color: #ffffff;
-        }
+        /* ── RESULTS VIEW ── */
+        .q-results-view{display:flex;flex-direction:column;gap:14px}
+        .qr-banner{display:grid;grid-template-columns:auto 1fr;gap:24px;padding:20px;background:#090909;border:1px solid #1e3a5f;align-items:center}
+        .qr-score-wrap{display:flex;flex-direction:column;align-items:center;gap:6px}
+        .qr-score-circle{width:90px;height:90px;border-radius:50%;background:#070707;border:2px solid #1e3a5f;display:flex;flex-direction:column;align-items:center;justify-content:center}
+        .qr-score-val{font-size:22px;font-weight:700}
+        .qr-score-total{font-size:9px;opacity:0.4}
+        .qr-score-pct{font-size:18px;font-weight:700;color:#6ab4ff}
+        .qr-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
+        .qr-stat{background:#070707;border:1px solid #111;padding:8px;display:flex;flex-direction:column;gap:3px}
+        .qr-stat span:first-child{font-size:7px;opacity:0.35}
+        .qr-stat span:last-child{font-size:13px;font-weight:700}
+        .qr-breakdown-title{font-size:8px;letter-spacing:1.5px;opacity:0.35}
+        .qr-breakdown{display:flex;flex-direction:column;gap:4px}
+        .qr-q-row{display:grid;grid-template-columns:30px 1fr auto;gap:8px;padding:8px 10px;border:1px solid #111;align-items:flex-start;border-left:3px solid #111}
+        .qr-correct{border-left-color:#6dba72;background:rgba(74,144,80,0.05)}
+        .qr-wrong{border-left-color:#c86060;background:rgba(180,60,60,0.04)}
+        .qr-skipped{border-left-color:#555;opacity:0.6}
+        .qr-q-num{font-size:9px;opacity:0.5;font-weight:700;padding-top:1px}
+        .qr-q-text{font-size:9px;margin-bottom:4px;line-height:1.4}
+        .qr-q-ans{display:flex;gap:16px;font-size:7px;opacity:0.55}
+        .qr-correct-ans{color:#6dba72}
+        .qr-expl{font-size:7px;opacity:0.4;margin-top:3px;font-style:italic}
+        .qr-q-right{display:flex;flex-direction:column;align-items:flex-end;gap:4px}
+        .qr-result{font-size:7px;padding:2px 6px;letter-spacing:0.5px}
+        .qr-c{background:rgba(74,144,80,0.2);color:#6dba72}
+        .qr-w{background:rgba(180,60,60,0.2);color:#c86060}
+        .qr-s{background:rgba(80,80,80,0.2);color:#888}
+        .qr-q-pts{font-size:9px;font-weight:700;color:#6ab4ff}
+        .qr-lb-title{font-size:8px;letter-spacing:1.5px;opacity:0.35}
+        .qr-lb{display:flex;flex-direction:column;gap:4px}
+        .qr-lb-row{display:grid;grid-template-columns:30px 140px 1fr 60px 80px;gap:8px;align-items:center;padding:6px 8px;border:1px solid #111;font-size:9px}
+        .qr-lb-me{background:rgba(30,58,95,0.1);border-color:#1e3a5f}
+        .qr-lb-rank{opacity:0.5;font-weight:700}
+        .qr-lb-name{font-size:9px}
+        .qr-lb-bar-wrap{overflow:hidden}
+        .qr-lb-bar{height:4px;background:#111}
+        .qr-lb-fill{height:100%;background:#1e3a5f;transition:width 0.5s}
+        .qr-lb-score{font-size:10px;font-weight:700;text-align:right}
+        .qr-lb-status{font-size:7px;opacity:0.5}
+        .qr-done{color:#6dba72;opacity:1}
+        .qr-actions{display:flex;gap:10px;margin-top:4px}
+        .qr-btn{padding:9px 24px;font-size:9px;cursor:pointer;font-family:inherit;letter-spacing:1px;transition:all 0.2s}
+        .qr-btn.primary{background:#1e3a5f;border:none;color:#fff}
+        .qr-btn.primary:hover{background:#2a4a7a}
+        .qr-btn.secondary{background:none;border:1px solid #1a1a1a;color:#fff}
+        .qr-btn.secondary:hover{border-color:#1e3a5f}
 
-        .lock-badge {
-          font-size: 0.7rem;
-          color: #ff4444;
-          background: #331111;
-          padding: 0.2rem 0.5rem;
-          border-radius: 4px;
-        }
+        /* ── CREATE VIEW ── */
+        .q-create-view{display:flex;flex-direction:column;gap:16px}
+        .q-steps{display:flex;align-items:center;gap:0;margin-bottom:4px;overflow-x:auto}
+        .q-step{display:flex;align-items:center;gap:0}
+        .q-step-num{width:24px;height:24px;border-radius:50%;background:#111;border:1px solid #1a1a1a;color:#fff;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;flex-shrink:0;z-index:1}
+        .q-step-label{font-size:7px;letter-spacing:1px;opacity:0.35;margin:0 6px;white-space:nowrap}
+        .q-step-line{flex:1;height:1px;background:#1a1a1a;min-width:20px}
+        .q-step-done .q-step-num{border-color:#1e3a5f;background:rgba(30,58,95,0.3)}
+        .q-step-done .q-step-label{opacity:0.55}
+        .q-step-done .q-step-line{background:#1e3a5f}
+        .q-step-active .q-step-num{border-color:#1e3a5f;background:#1e3a5f}
+        .q-step-active .q-step-label{opacity:1;color:#6ab4ff}
+        .q-step-body{background:#090909;border:1px solid #1e3a5f;padding:20px;flex:1}
+        .q-form-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+        .q-field{display:flex;flex-direction:column;gap:5px}
+        .q-field-full{grid-column:1/-1}
+        .q-field label{font-size:7px;opacity:0.45;letter-spacing:1px}
+        .q-input{background:#0e0e0e;border:1px solid #1a1a1a;color:#fff;padding:7px 10px;font-size:10px;font-family:inherit;outline:none;transition:border-color 0.15s;width:100%}
+        .q-input:focus{border-color:#1e3a5f}
+        .q-input::placeholder{opacity:0.25}
+        .q-textarea{resize:vertical;min-height:52px;line-height:1.5}
+        select.q-input{cursor:pointer}
+        .q-q-layout{display:grid;grid-template-columns:200px 1fr;gap:12px;padding:0!important;background:none!important;border:none!important}
+        .q-q-list{background:#090909;border:1px solid #1e3a5f;padding:12px;display:flex;flex-direction:column;gap:4px;overflow-y:auto;max-height:520px}
+        .q-ql-title{font-size:7px;letter-spacing:1.5px;opacity:0.35;margin-bottom:6px}
+        .q-ql-empty{font-size:8px;opacity:0.2;text-align:center;padding:20px 0}
+        .q-ql-item{display:flex;align-items:center;gap:6px;padding:6px;border:1px solid #111;transition:border-color 0.15s}
+        .q-ql-item:hover{border-color:#1e3a5f}
+        .q-ql-num{font-size:9px;color:#1e3a5f;font-weight:700;flex-shrink:0;width:22px}
+        .q-ql-info{flex:1;min-width:0}
+        .q-ql-text{font-size:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:2px}
+        .q-ql-meta{display:flex;gap:6px;font-size:6px;opacity:0.45}
+        .q-ql-rm{background:none;border:none;color:#555;font-size:14px;cursor:pointer;flex-shrink:0;line-height:1}
+        .q-ql-rm:hover{color:#fff}
+        .q-ql-sum{margin-top:8px;padding-top:8px;border-top:1px solid #1e3a5f;display:flex;justify-content:space-between;font-size:7px;opacity:0.5}
+        .q-q-editor{background:#090909;border:1px solid #1e3a5f;padding:14px;overflow-y:auto}
+        .q-opts-section{margin:10px 0}
+        .q-opt-row{display:flex;align-items:center;gap:8px;margin-bottom:5px}
+        .q-radio{width:12px;height:12px;cursor:pointer;flex-shrink:0;accent-color:#1e3a5f}
+        .q-opt-label{font-size:8px;opacity:0.5;width:14px;flex-shrink:0}
+        .q-opt-inp{flex:1}
+        .q-add-q-btn{width:100%;background:#1e3a5f;border:none;color:#fff;padding:9px;font-size:9px;cursor:pointer;font-family:inherit;letter-spacing:1px;transition:background 0.2s;margin-top:12px}
+        .q-add-q-btn:hover:not(:disabled){background:#2a4a7a}
+        .q-add-q-btn:disabled{opacity:0.35;cursor:not-allowed}
+        .q-settings-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+        .q-setting-card{background:#0e0e0e;border:1px solid #1a1a1a;padding:12px 14px;display:flex;justify-content:space-between;align-items:center;gap:12px;transition:border-color 0.15s}
+        .q-setting-card:hover{border-color:#1e3a5f}
+        .q-sc-label{font-size:9px;margin-bottom:2px}
+        .q-sc-sub{font-size:7px;opacity:0.35}
+        .q-toggle{width:36px;height:18px;border-radius:9px;background:#1a1a1a;border:1px solid #222;position:relative;cursor:pointer;flex-shrink:0;transition:background 0.2s}
+        .q-toggle-on{background:#1e3a5f;border-color:#1e3a5f}
+        .q-toggle-knob{position:absolute;top:2px;left:2px;width:12px;height:12px;border-radius:50%;background:#555;transition:transform 0.2s,background 0.2s}
+        .q-toggle-on .q-toggle-knob{transform:translateX(18px);background:#fff}
+        .q-review-panel{background:#090909;border:1px solid #1e3a5f;padding:14px}
+        .q-pd-title{font-size:8px;letter-spacing:1.5px;opacity:0.35;margin-bottom:4px}
+        .q-pd-row{display:flex;justify-content:space-between;font-size:9px;padding:4px 8px;border-bottom:1px dotted #0d0d0d;background:#090909}
+        .q-pd-row span:first-child{opacity:0.45}
+        .q-published{display:flex;flex-direction:column;align-items:center;gap:20px;text-align:center;padding:40px}
+        .q-pub-title{font-size:16px;font-weight:700;letter-spacing:3px;color:#6ab4ff}
+        .q-pub-sub{font-size:9px;opacity:0.4}
+        .q-pub-creds{display:flex;gap:20px}
+        .q-pub-cred{background:#090909;border:1px solid #1e3a5f;padding:16px 28px;display:flex;flex-direction:column;gap:6px;align-items:center}
+        .q-pub-cred>span:first-child{font-size:7px;opacity:0.4;letter-spacing:1px}
+        .q-pub-code{font-size:28px;font-weight:700;letter-spacing:6px}
+        .q-pub-pass{font-size:24px;font-weight:700;letter-spacing:4px;color:#6ab4ff}
+        .q-pub-details{background:#090909;border:1px solid #1e3a5f;padding:14px 24px;min-width:300px}
+        .q-pub-acts{display:flex;gap:12px}
+        .q-step-nav{display:flex;justify-content:space-between;align-items:center;padding:14px 0;border-top:1px solid #1e3a5f;margin-top:4px}
+        .q-nav-btn{padding:8px 24px;font-size:9px;cursor:pointer;font-family:inherit;letter-spacing:1px;transition:all 0.2s}
+        .q-nav-btn.primary{background:#1e3a5f;border:none;color:#fff}
+        .q-nav-btn.primary:hover:not(:disabled){background:#2a4a7a}
+        .q-nav-btn.secondary{background:none;border:1px solid #1a1a1a;color:#fff}
+        .q-nav-btn.secondary:hover:not(:disabled){border-color:#1e3a5f}
+        .q-nav-btn:disabled{opacity:0.3;cursor:not-allowed}
+        .q-step-indicator{font-size:8px;opacity:0.35;letter-spacing:1px}
 
-        .quiz-description {
-          font-size: 0.9rem;
-          color: #cccccc;
-          margin-bottom: 1rem;
-        }
+        /* Scan line */
+        .q-scan-line{position:fixed;top:0;left:0;right:0;height:100%;background:linear-gradient(to bottom,transparent 0%,rgba(30,58,95,0.02) 50%,transparent 100%);pointer-events:none;animation:qscan 8s linear infinite;z-index:999}
+        @keyframes qscan{0%{transform:translateY(-100%)}100%{transform:translateY(100%)}}
 
-        .quiz-meta {
-          display: flex;
-          gap: 1rem;
-          font-size: 0.85rem;
-          color: #999999;
-          margin-bottom: 1rem;
-        }
-
-        .quiz-categories {
-          display: flex;
-          gap: 0.5rem;
-          flex-wrap: wrap;
-          margin-bottom: 1rem;
-        }
-
-        .category-tag {
-          background: #2a2a2a;
-          padding: 0.2rem 0.5rem;
-          border-radius: 4px;
-          font-size: 0.7rem;
-          color: #cccccc;
-        }
-
-        .quiz-footer {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          margin-top: 1rem;
-          padding-top: 1rem;
-          border-top: 1px solid #2a2a2a;
-        }
-
-        .creator {
-          font-size: 0.8rem;
-          color: #999999;
-        }
-
-        .footer-actions {
-          display: flex;
-          align-items: center;
-          gap: 1rem;
-        }
-
-        .quiz-code {
-          font-size: 0.8rem;
-          color: #1e3a5f;
-          font-weight: 500;
-        }
-
-        .btn-small {
-          padding: 0.3rem 1rem;
-          font-size: 0.85rem;
-        }
-
-        @media (max-width: 768px) {
-          .quiz-header {
-            flex-direction: column;
-            gap: 1rem;
-            text-align: center;
-          }
-
-          .quiz-filters {
-            flex-direction: column;
-          }
-
-          .header-actions {
-            width: 100%;
-            justify-content: center;
-          }
-        }
+        /* Responsive */
+        @media(max-width:1200px){.q-stats-grid{grid-template-columns:repeat(3,1fr)}.q-table-header,.q-table-row{grid-template-columns:2fr 70px 90px 55px 75px 80px 55px 45px 45px 80px}}
+        @media(max-width:1000px){.q-main{flex-direction:column}.q-sidebar{width:100%}.qt-body{grid-template-columns:1fr}.q-join-grid{grid-template-columns:1fr 1fr}.q-q-layout{grid-template-columns:1fr}.q-settings-grid{grid-template-columns:1fr}}
+        @media(max-width:768px){.q-stats-grid{grid-template-columns:repeat(2,1fr)}.q-join-grid{grid-template-columns:1fr}.q-form-grid{grid-template-columns:1fr}.q-join-manual{grid-template-columns:1fr}.qr-stats{grid-template-columns:repeat(2,1fr)}.qr-lb-row{grid-template-columns:24px 100px 1fr 50px 70px}}
       `}</style>
     </div>
   )

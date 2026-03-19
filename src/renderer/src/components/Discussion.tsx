@@ -1,34 +1,24 @@
 import React, { useState, useEffect, useRef } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
-import { useApp } from '../App'
+import { useNavigate } from 'react-router-dom'
+
+// ==================== TYPES ====================
 
 interface Reply {
   id: string
   userId: string
   userName: string
-  userAvatar: string
   userRole: 'teacher' | 'student' | 'admin'
-  userBadges?: string[]
   content: string
   codeSnippet?: string
-  attachments?: Attachment[]
   timestamp: Date
   editedAt?: Date
   likes: string[]
   dislikes: string[]
-  replies?: Reply[] // Nested replies
+  replies?: Reply[]
   parentId?: string
   isSolution?: boolean
   isPinned?: boolean
   isEdited?: boolean
-}
-
-interface Attachment {
-  id: string
-  type: 'image' | 'code' | 'link' | 'file'
-  url: string
-  name: string
-  size?: number
 }
 
 interface Discussion {
@@ -38,9 +28,8 @@ interface Discussion {
   codeSnippet?: string
   createdBy: string
   creatorName: string
-  creatorAvatar: string
   creatorRole: 'teacher' | 'student' | 'admin'
-  creatorBadges?: string[]
+  creatorBadges: string[]
   createdAt: Date
   views: number
   replies: Reply[]
@@ -51,2907 +40,1239 @@ interface Discussion {
   isPinned: boolean
   isLocked: boolean
   isSolved: boolean
-  isSticky: boolean
   hasSolution: boolean
   lastActivity: Date
   contributors: string[]
-  attachments?: Attachment[]
-  relatedDiscussions?: string[]
 }
 
 interface Category {
   id: string
   name: string
-  icon: string
   description: string
   count: number
 }
 
-interface UserStats {
-  topicsCreated: number
-  repliesGiven: number
-  solutionsMarked: number
-  likesReceived: number
-  badges: string[]
-  reputation: number
-  joinDate: Date
-  lastActive: Date
+interface ForumStats {
+  totalTopics: number
+  totalReplies: number
+  totalContributors: number
+  solvedCount: number
+  activeToday: number
+  views: number
 }
 
+// ==================== COMPONENT ====================
+
 export default function DiscussionForum() {
-  const { sessionId, discussionId } = useParams()
   const navigate = useNavigate()
-  const { currentUser, deviceInfo } = useApp()
-  
-  // Refs
   const editorRef = useRef<HTMLTextAreaElement>(null)
-  const messagesEndRef = useRef<HTMLDivElement>(null)
-  
-  // Main state
-  const [discussions, setDiscussions] = useState<Discussion[]>([])
+
+  // ── View State ──
+  const [view, setView] = useState<'list' | 'detail' | 'create'>('list')
+  const [time, setTime] = useState(new Date())
+  const [logs, setLogs] = useState<string[]>([])
+
+  // ── List State ──
   const [selectedDiscussion, setSelectedDiscussion] = useState<Discussion | null>(null)
-  const [categories, setCategories] = useState<Category[]>([])
-  const [userStats, setUserStats] = useState<UserStats | null>(null)
-  
-  // UI state
-  const [view, setView] = useState<'grid' | 'list'>('list')
+  const [selectedCategory, setSelectedCategory] = useState('all')
+  const [search, setSearch] = useState('')
   const [sortBy, setSortBy] = useState<'latest' | 'popular' | 'unanswered' | 'solved'>('latest')
-  const [timeFilter, setTimeFilter] = useState<'all' | 'today' | 'week' | 'month' | 'year'>('all')
-  const [selectedCategory, setSelectedCategory] = useState<string>('all')
-  const [searchQuery, setSearchQuery] = useState('')
-  const [showFilters, setShowFilters] = useState(false)
-  
-  // Modal states
-  const [showCreateModal, setShowCreateModal] = useState(false)
-  const [showEditModal, setShowEditModal] = useState(false)
-  const [showReportModal, setShowReportModal] = useState(false)
-  const [showShareModal, setShowShareModal] = useState(false)
-  const [showUserProfile, setShowUserProfile] = useState<string | null>(null)
-  
-  // Create/Edit states
-  const [newDiscussion, setNewDiscussion] = useState({
-    topic: '',
-    content: '',
-    category: 'general',
-    tags: [] as string[],
-    codeSnippet: '',
-    attachments: [] as Attachment[]
-  })
-  
-  const [editDiscussion, setEditDiscussion] = useState<Discussion | null>(null)
+  const [timeFilter, setTimeFilter] = useState<'all' | 'today' | 'week' | 'month'>('all')
+  const [currentPage, setCurrentPage] = useState(1)
+  const itemsPerPage = 8
+
+  // ── Create State ──
+  const [draftTopic, setDraftTopic] = useState('')
+  const [draftContent, setDraftContent] = useState('')
+  const [draftCategory, setDraftCategory] = useState('general')
+  const [draftCode, setDraftCode] = useState('')
+  const [draftTags, setDraftTags] = useState<string[]>([])
+  const [tagInput, setTagInput] = useState('')
+  const [showCodeInCreate, setShowCodeInCreate] = useState(false)
+
+  // ── Reply State ──
   const [newReply, setNewReply] = useState('')
   const [replyCode, setReplyCode] = useState('')
   const [replyTo, setReplyTo] = useState<string | null>(null)
   const [showCodeEditor, setShowCodeEditor] = useState(false)
-  
-  // Input states
-  const [tagInput, setTagInput] = useState('')
-  const [selectedTags, setSelectedTags] = useState<string[]>([])
-  const [contributorInput, setContributorInput] = useState('')
-  
-  // Pagination
-  const [currentPage, setCurrentPage] = useState(1)
-  const [itemsPerPage] = useState(10)
-  const [totalPages, setTotalPages] = useState(1)
-  
-  // Loading states
-  const [isLoading, setIsLoading] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
-  const [error, setError] = useState<string | null>(null)
 
-  // Load sample data
+  // ── Modals ──
+  const [showReport, setShowReport] = useState(false)
+  const [showShare, setShowShare] = useState(false)
+  const [reportTarget, setReportTarget] = useState('')
+
+  // ── Data ──
+  const [categories] = useState<Category[]>([
+    { id: 'general', name: 'General', description: 'General CS topics', count: 156 },
+    { id: 'algorithms', name: 'Algorithms', description: 'Algorithm design and analysis', count: 89 },
+    { id: 'data-structures', name: 'Data Structures', description: 'Arrays, trees, graphs', count: 67 },
+    { id: 'web-dev', name: 'Web Dev', description: 'Frontend and backend', count: 123 },
+    { id: 'system-design', name: 'System Design', description: 'Architecture and scalability', count: 28 },
+    { id: 'database', name: 'Databases', description: 'SQL, NoSQL, optimization', count: 34 },
+    { id: 'career', name: 'Career', description: 'Interview prep and advice', count: 92 },
+  ])
+
+  const [stats, setStats] = useState<ForumStats>({
+    totalTopics: 3, totalReplies: 8, totalContributors: 6,
+    solvedCount: 2, activeToday: 5, views: 2693
+  })
+
+  const [discussions, setDiscussions] = useState<Discussion[]>([
+    {
+      id: 'd1', topic: 'Understanding Time Complexity: A Comprehensive Guide',
+      content: `I have been struggling with Big O notation and time complexity analysis. Can someone explain the difference between O(n), O(log n), and O(n log n) with practical examples?\n\nI understand the basics but when it comes to analyzing recursive algorithms, I get confused. For example, how do we analyze the time complexity of merge sort?\n\nWould appreciate:\n1. Clear definitions\n2. Visual examples\n3. Common pitfalls\n4. Practice problems`,
+      codeSnippet: `function mergeSort(arr) {\n  if (arr.length <= 1) return arr;\n  const mid = Math.floor(arr.length / 2);\n  const left = mergeSort(arr.slice(0, mid));\n  const right = mergeSort(arr.slice(mid));\n  return merge(left, right);\n}`,
+      createdBy: 'u1', creatorName: 'Dr. Sharma', creatorRole: 'teacher',
+      creatorBadges: ['PhD', 'Mentor', 'Top Contributor'],
+      createdAt: new Date(Date.now() - 86400000 * 2), views: 1234,
+      replies: [
+        {
+          id: 'r1', userId: 'u2', userName: 'Priya Singh', userRole: 'student',
+          content: `Great question. Let me break down time complexity:\n\nO(1) — Constant time. Operations that take the same time regardless of input size. Example: array access by index.\n\nO(log n) — Logarithmic time. Operations that halve the problem each step. Example: binary search.\n\nO(n) — Linear time. Operations that scale linearly. Example: single loop through array.\n\nO(n log n) — Linearithmic. Common in efficient sorting. Example: merge sort, quicksort average case.\n\nO(n2) — Quadratic. Nested loops. Example: bubble sort, selection sort.\n\nFor merge sort specifically: each level splits array in half giving log n levels. At each level we do O(n) work merging. Total: O(n log n).`,
+          codeSnippet: `// Binary Search O(log n)\nfunction binarySearch(arr, target) {\n  let left = 0, right = arr.length - 1;\n  while (left <= right) {\n    const mid = Math.floor((left + right) / 2);\n    if (arr[mid] === target) return mid;\n    if (arr[mid] < target) left = mid + 1;\n    else right = mid - 1;\n  }\n  return -1;\n}`,
+          timestamp: new Date(Date.now() - 43200000),
+          likes: ['u3', 'u4', 'u5', 'u6'], dislikes: [],
+          isSolution: false, isPinned: false,
+          replies: [
+            {
+              id: 'r1_1', userId: 'u3', userName: 'Rahul Kumar', userRole: 'student',
+              content: 'This is incredibly helpful. Can you also explain space complexity?',
+              timestamp: new Date(Date.now() - 21600000), likes: ['u2'], dislikes: []
+            },
+            {
+              id: 'r1_2', userId: 'u2', userName: 'Priya Singh', userRole: 'student',
+              content: `Space complexity refers to memory usage:\n\nO(1) — Constant space, in-place algorithms.\nO(n) — Linear space, copying arrays.\nO(n2) — Quadratic space, 2D matrices.\n\nFor recursive algorithms, remember to account for the call stack space as well.`,
+              timestamp: new Date(Date.now() - 10800000), likes: ['u1', 'u3'], dislikes: []
+            }
+          ]
+        },
+        {
+          id: 'r2', userId: 'u4', userName: 'Prof. Verma', userRole: 'teacher',
+          content: `Excellent discussion. Let me add some practical tips:\n\n1. Always look for nested loops — they often indicate O(n2).\n2. Recursion with multiple calls per level often indicates O(2^n).\n3. Sorting algorithms are usually O(n log n).\n4. Hash table operations are O(1) average case.\n5. Binary search on sorted data is always O(log n).\n\nVisualize the problem size growth: double the input, how much slower does it get? O(1): same. O(log n): barely more. O(n): twice as slow. O(n2): four times as slow.`,
+          timestamp: new Date(Date.now() - 86400000),
+          likes: ['u1', 'u2', 'u5', 'u7'], dislikes: [],
+          isSolution: true, isPinned: true
+        }
+      ],
+      likes: 45, dislikes: 3,
+      tags: ['algorithms', 'time-complexity', 'big-o', 'beginner'],
+      category: 'algorithms', isPinned: true, isLocked: false,
+      isSolved: true, hasSolution: true,
+      lastActivity: new Date(Date.now() - 3600000),
+      contributors: ['u2', 'u3', 'u4']
+    },
+    {
+      id: 'd2', topic: 'System Design: Designing a URL Shortener like TinyURL',
+      content: `I am preparing for system design interviews and want to understand how to design a URL shortener.\n\nRequirements:\n- Generate unique short URLs\n- Handle millions of URLs\n- High availability and low latency\n\nMy initial thoughts:\n1. Base62 encoding for short URLs\n2. Database to store mappings\n3. Cache frequently accessed URLs\n4. Load balancers for scaling\n\nWhat am I missing? How would you handle custom short URLs, analytics tracking, expiration policies, and rate limiting?`,
+      createdBy: 'u5', creatorName: 'Anjali Patel', creatorRole: 'student',
+      creatorBadges: ['SDE Intern', 'Top Contributor'],
+      createdAt: new Date(Date.now() - 86400000 * 5), views: 892,
+      replies: [
+        {
+          id: 'r3', userId: 'u6', userName: 'Vikram Singh', userRole: 'student',
+          content: `Great question. Here is a comprehensive design:\n\nAPI Layer:\n- POST /shorten — Create short URL\n- GET /{shortCode} — Redirect\n- GET /analytics/{shortCode} — Get stats\n\nLoad Balancers: distribute traffic using consistent hashing for cache affinity.\n\nDatabase Layer:\n- Primary DB (PostgreSQL) for mappings\n- Table: url_mappings (id, long_url, short_code, created_at, expires_at, user_id)\n- Cache Layer (Redis) with LRU eviction and TTL\n\nURL Generation Strategies:\n1. Base62 encoding — counter-based, predictable\n2. MD5 hashing with first 6 chars — risk of collision\n3. Distributed ID Generator (Snowflake) — guarantees uniqueness\n\nScaling: shard by short_code, read replicas for analytics, CDN for static assets, message queue for async processing.`,
+          codeSnippet: `class URLShortener {\n  async createShortURL(longUrl, userId) {\n    await this.checkRateLimit(userId);\n    const shortCode = await this.generateUniqueCode();\n    await db.urlMappings.create({ shortCode, longUrl, userId });\n    await redis.setex(shortCode, 3600, longUrl);\n    await queue.add('analytics', { shortCode, event: 'create' });\n    return \`https://short.url/\${shortCode}\`;\n  }\n}`,
+          timestamp: new Date(Date.now() - 86400000 * 3),
+          likes: ['u1', 'u4', 'u7', 'u8'], dislikes: [],
+          isSolution: true, isPinned: false,
+          replies: [
+            {
+              id: 'r3_1', userId: 'u5', userName: 'Anjali Patel', userRole: 'student',
+              content: 'This is extremely detailed, thank you. How would you handle custom short URLs specifically?',
+              timestamp: new Date(Date.now() - 86400000 * 2), likes: ['u6'], dislikes: []
+            },
+            {
+              id: 'r3_2', userId: 'u6', userName: 'Vikram Singh', userRole: 'student',
+              content: `For custom URLs:\n\n1. Validation: check if custom code is already taken.\n2. Constraints: min 3 chars, max 16 chars, alphanumeric plus dash and underscore.\n3. Reservation: let users reserve custom URLs in advance.\n4. Premium Feature: consider making it a paid feature to reduce abuse.\n\nAdditional: profanity filter, reserved words (api, admin, www), case-insensitive uniqueness check.`,
+              timestamp: new Date(Date.now() - 86400000), likes: ['u5'], dislikes: []
+            }
+          ]
+        }
+      ],
+      likes: 67, dislikes: 2,
+      tags: ['system-design', 'scalability', 'database', 'caching'],
+      category: 'system-design', isPinned: true, isLocked: false,
+      isSolved: true, hasSolution: true,
+      lastActivity: new Date(Date.now() - 3600000),
+      contributors: ['u6', 'u7', 'u8']
+    },
+    {
+      id: 'd3', topic: 'JavaScript Closures: Understanding the Magic',
+      content: `I have been learning JavaScript and closures are confusing me. Can someone explain:\n\n1. What exactly is a closure?\n2. How do they work under the hood?\n3. Practical use cases\n4. Common pitfalls\n\nI have read the MDN docs but still struggling with practical implementation.`,
+      codeSnippet: `function outer() {\n  let count = 0;\n  return function inner() {\n    count++;\n    console.log(count);\n  }\n}\nconst counter = outer();\ncounter(); // 1\ncounter(); // 2\ncounter(); // 3`,
+      createdBy: 'u8', creatorName: 'Neha Gupta', creatorRole: 'student',
+      creatorBadges: [],
+      createdAt: new Date(Date.now() - 86400000 * 3), views: 567,
+      replies: [
+        {
+          id: 'r5', userId: 'u9', userName: 'Rajesh Kumar', userRole: 'student',
+          content: `A closure is a function that has access to its outer function scope even after the outer function has returned.\n\nHow it works: when a function is defined in JavaScript, it carries its lexical environment with it — local variables, outer function variables, global variables. The inner function maintains a reference to outer variables, preventing garbage collection.\n\nCommon Use Cases:\n\n1. Data Privacy — encapsulate private state using closures instead of exposing variables globally.\n\n2. Function Factories — create specialized functions that share a common base.\n\n3. Event Handlers — closures let handlers remember context from when they were created.\n\nCommon Pitfalls:\n\nMemory Leaks — if a large object is captured in a closure and the closure lives long, the object is never garbage collected.\n\nLoop with var — var is function-scoped not block-scoped, so all iterations share the same variable. Use let instead.`,
+          codeSnippet: `// Data Privacy\nconst BankAccount = (initialBalance) => {\n  let balance = initialBalance;\n  return {\n    deposit: (amt) => { balance += amt; return balance; },\n    withdraw: (amt) => {\n      if (amt <= balance) { balance -= amt; return balance; }\n      return 'Insufficient funds';\n    },\n    getBalance: () => balance\n  };\n};\n\n// Function Factory\nconst multiplyBy = (x) => (y) => x * y;\nconst double = multiplyBy(2);\nconst triple = multiplyBy(3);`,
+          timestamp: new Date(Date.now() - 86400000 * 2),
+          likes: ['u1', 'u3', 'u5', 'u8'], dislikes: [],
+          isSolution: true, isPinned: false,
+          replies: [
+            {
+              id: 'r5_1', userId: 'u8', userName: 'Neha Gupta', userRole: 'student',
+              content: 'The BankAccount example made it click instantly. Thank you so much.',
+              timestamp: new Date(Date.now() - 86400000), likes: ['u9'], dislikes: []
+            }
+          ]
+        }
+      ],
+      likes: 34, dislikes: 1,
+      tags: ['javascript', 'closures', 'beginner', 'web-dev'],
+      category: 'web-dev', isPinned: false, isLocked: false,
+      isSolved: true, hasSolution: true,
+      lastActivity: new Date(Date.now() - 86400000),
+      contributors: ['u9']
+    }
+  ])
+
+  // ── Effects ──
+
   useEffect(() => {
-    loadCategories()
-    loadDiscussions()
-    loadUserStats()
+    const t = setInterval(() => setTime(new Date()), 1000)
+    return () => clearInterval(t)
   }, [])
 
-  const loadCategories = () => {
-    const sampleCategories: Category[] = [
-      {
-        id: 'general',
-        name: 'General Discussion',
-        icon: '💬',
-        description: 'General topics about computer science and programming',
-        count: 156
-      },
-      {
-        id: 'algorithms',
-        name: 'Algorithms',
-        icon: '⚡',
-        description: 'Discuss algorithm design, analysis, and optimization',
-        count: 89
-      },
-      {
-        id: 'data-structures',
-        name: 'Data Structures',
-        icon: '📊',
-        description: 'Arrays, linked lists, trees, graphs, and more',
-        count: 67
-      },
-      {
-        id: 'web-dev',
-        name: 'Web Development',
-        icon: '🌐',
-        description: 'Frontend, backend, and full-stack development',
-        count: 123
-      },
-      {
-        id: 'mobile-dev',
-        name: 'Mobile Development',
-        icon: '📱',
-        description: 'iOS, Android, and cross-platform development',
-        count: 45
-      },
-      {
-        id: 'database',
-        name: 'Databases',
-        icon: '🗄️',
-        description: 'SQL, NoSQL, database design and optimization',
-        count: 34
-      },
-      {
-        id: 'system-design',
-        name: 'System Design',
-        icon: '🏗️',
-        description: 'Architecture, scalability, and distributed systems',
-        count: 28
-      },
-      {
-        id: 'career',
-        name: 'Career Advice',
-        icon: '🚀',
-        description: 'Interview prep, resume reviews, and career growth',
-        count: 92
-      }
-    ]
-    setCategories(sampleCategories)
-  }
+  // Simulate live view increments
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setDiscussions(prev => prev.map(d => ({
+        ...d,
+        views: d.views + (Math.random() > 0.7 ? 1 : 0)
+      })))
+      setStats(prev => ({ ...prev, views: prev.views + Math.floor(Math.random() * 3) }))
+    }, 5000)
+    return () => clearInterval(interval)
+  }, [])
 
-  const loadDiscussions = () => {
-    setIsLoading(true)
-    
-    const sampleDiscussions: Discussion[] = [
-      {
-        id: '1',
-        topic: 'Understanding Time Complexity: A Comprehensive Guide',
-        content: `I've been struggling with understanding Big O notation and time complexity analysis. Can someone explain the difference between O(n), O(log n), and O(n log n) with practical examples?
-
-I understand the basics but when it comes to analyzing recursive algorithms, I get confused. For example, how do we analyze the time complexity of a recursive function like merge sort?
-
-Would appreciate if someone could provide:
-1. Clear definitions
-2. Visual examples
-3. Common pitfalls to avoid
-4. Practice problems with solutions`,
-        codeSnippet: `function mergeSort(arr) {
-  if (arr.length <= 1) return arr;
-  
-  const mid = Math.floor(arr.length / 2);
-  const left = mergeSort(arr.slice(0, mid));
-  const right = mergeSort(arr.slice(mid));
-  
-  return merge(left, right);
-}`,
-        createdBy: 'user-1',
-        creatorName: 'Dr. Sharma',
-        creatorAvatar: '👨‍🏫',
-        creatorRole: 'teacher',
-        creatorBadges: ['PhD', 'Mentor', 'Top Contributor'],
-        createdAt: new Date(Date.now() - 86400000 * 2),
-        views: 1234,
-        replies: [
-          {
-            id: 'r1',
-            userId: 'user-2',
-            userName: 'Priya Singh',
-            userAvatar: '👩‍🎓',
-            userRole: 'student',
-            userBadges: ['Scholar', 'Helper'],
-            content: `Great question! Let me break down time complexity:
-
-## Big O Notation Explained
-
-**O(1) - Constant Time**
-- Operations that take the same time regardless of input size
-- Example: Array access by index
-
-**O(log n) - Logarithmic Time**
-- Operations that cut the problem size in half each step
-- Example: Binary search
-
-**O(n) - Linear Time**
-- Operations that scale linearly with input size
-- Example: Simple loop through array
-
-**O(n log n) - Linearithmic Time**
-- Common in efficient sorting algorithms
-- Example: Merge sort, quicksort (average case)
-
-**O(n²) - Quadratic Time**
-- Operations with nested loops
-- Example: Bubble sort, selection sort
-
-For merge sort specifically:
-- Each level splits array in half: log n levels
-- At each level, we do O(n) work merging
-- Total: O(n log n)`,
-            codeSnippet: `// Binary Search - O(log n)
-function binarySearch(arr, target) {
-  let left = 0, right = arr.length - 1;
-  
-  while (left <= right) {
-    const mid = Math.floor((left + right) / 2);
-    if (arr[mid] === target) return mid;
-    if (arr[mid] < target) left = mid + 1;
-    else right = mid - 1;
-  }
-  return -1;
-}`,
-            timestamp: new Date(Date.now() - 43200000),
-            likes: ['user-3', 'user-4', 'user-5', 'user-6'],
-            dislikes: [],
-            replies: [
-              {
-                id: 'r1_1',
-                userId: 'user-3',
-                userName: 'Rahul Kumar',
-                userAvatar: '👨‍🎓',
-                userRole: 'student',
-                content: 'This is incredibly helpful! Can you also explain space complexity?',
-                timestamp: new Date(Date.now() - 21600000),
-                likes: ['user-2'],
-                dislikes: []
-              },
-              {
-                id: 'r1_2',
-                userId: 'user-2',
-                userName: 'Priya Singh',
-                userAvatar: '👩‍🎓',
-                userRole: 'student',
-                content: `Space complexity refers to the amount of memory an algorithm uses:
-
-**O(1)** - Constant space (in-place algorithms)
-**O(n)** - Linear space (copying arrays)
-**O(n²)** - Quadratic space (2D matrices)
-
-For recursive algorithms, we also need to consider the call stack space!`,
-                timestamp: new Date(Date.now() - 10800000),
-                likes: ['user-1', 'user-3'],
-                dislikes: []
-              }
-            ],
-            isSolution: false,
-            isPinned: false
-          },
-          {
-            id: 'r2',
-            userId: 'user-4',
-            userName: 'Prof. Verma',
-            userAvatar: '👨‍🏫',
-            userRole: 'teacher',
-            userBadges: ['PhD', 'Expert'],
-            content: `Excellent discussion! Let me add some visual resources:
-
-## Time Complexity Graph
-- O(1): Flat line
-- O(log n): Slowly increasing curve
-- O(n): Straight diagonal line
-- O(n log n): Slightly curved line
-- O(n²): Steep parabola
-
-## Practical Tips
-1. Always look for nested loops - they often indicate O(n²)
-2. Recursion with multiple calls per level often indicates O(2ⁿ)
-3. Sorting algorithms are usually O(n log n)
-4. Hash table operations are O(1) average case
-
-Here's a visualization tool I created: [Complexity Visualizer](https://example.com/complexity)`,
-            attachments: [
-              {
-                id: 'att1',
-                type: 'image',
-                url: '#',
-                name: 'complexity-graph.png'
-              }
-            ],
-            timestamp: new Date(Date.now() - 86400000),
-            likes: ['user-1', 'user-2', 'user-5', 'user-7'],
-            dislikes: [],
-            isSolution: true,
-            isPinned: true
-          }
-        ],
-        likes: 45,
-        dislikes: 3,
-        tags: ['algorithms', 'time-complexity', 'big-o', 'beginner'],
-        category: 'algorithms',
-        isPinned: true,
-        isLocked: false,
-        isSolved: true,
-        isSticky: false,
-        hasSolution: true,
-        lastActivity: new Date(Date.now() - 3600000),
-        contributors: ['user-2', 'user-4', 'user-5'],
-        attachments: []
-      },
-      {
-        id: '2',
-        topic: 'System Design: Designing a URL Shortener like TinyURL',
-        content: `I'm preparing for system design interviews and want to understand how to design a URL shortener service. 
-
-## Requirements:
-- Generate unique short URLs
-- Handle millions of URLs
-- High availability
-- Low latency redirects
-
-## My initial thoughts:
-1. Use base62 encoding for short URLs
-2. Database to store mappings
-3. Cache frequently accessed URLs
-4. Load balancers for scaling
-
-What am I missing? How would you handle:
-- Custom short URLs?
-- Analytics tracking?
-- Expiration policies?
-- Rate limiting?`,
-        createdBy: 'user-5',
-        creatorName: 'Anjali Patel',
-        creatorAvatar: '👩‍💻',
-        creatorRole: 'student',
-        creatorBadges: ['SDE Intern', 'Top Contributor'],
-        createdAt: new Date(Date.now() - 86400000 * 5),
-        views: 892,
-        replies: [
-          {
-            id: 'r3',
-            userId: 'user-6',
-            userName: 'Vikram Singh',
-            userAvatar: '👨‍💻',
-            userRole: 'student',
-            content: `Great question! Here's a comprehensive system design:
-
-## Architecture Components
-
-### 1. **API Layer**
-- POST /shorten - Create short URL
-- GET /{shortCode} - Redirect
-- GET /analytics/{shortCode} - Get stats
-
-### 2. **Load Balancers**
-- Distribute traffic across multiple app servers
-- Use consistent hashing for cache affinity
-
-### 3. **Application Servers**
-- Handle URL generation and validation
-- Implement rate limiting
-- Process analytics asynchronously
-
-### 4. **Database Layer**
-- Primary DB (PostgreSQL/MySQL) for mappings
-  - Table: url_mappings (id, long_url, short_code, created_at, expires_at, user_id)
-  - Table: analytics (id, short_code, accessed_at, ip, user_agent, referer)
-
-- Cache Layer (Redis)
-  - Cache frequently accessed URLs
-  - LRU eviction policy
-  - TTL based on access patterns
-
-### 5. **URL Generation Strategies**
-
-**Approach 1: Base62 Encoding**
-\`\`\`
-counter = get_next_sequence()
-short_code = base62_encode(counter)
-\`\`\`
-
-**Approach 2: MD5 Hashing**
-\`\`\`
-hash = md5(long_url + salt)[:6]
-\`\`\`
-
-**Approach 3: Distributed ID Generator**
-- Use Snowflake ID or similar
-- Guarantees uniqueness across servers
-
-### 6. **Scaling Considerations**
-- Database sharding by short_code
-- Read replicas for analytics queries
-- CDN for static assets
-- Message queue for async processing`,
-            codeSnippet: `// Example API Implementation
-class URLShortener {
-  async createShortURL(longUrl: string, userId?: string) {
-    // Rate limiting check
-    await this.checkRateLimit(userId);
-    
-    // Generate unique code
-    const shortCode = await this.generateUniqueCode();
-    
-    // Store in database
-    await db.urlMappings.create({
-      shortCode,
-      longUrl,
-      userId,
-      createdAt: new Date()
-    });
-    
-    // Cache the mapping
-    await redis.setex(shortCode, 3600, longUrl);
-    
-    // Queue analytics job
-    await queue.add('analytics', { shortCode, event: 'create' });
-    
-    return \`https://short.url/\${shortCode}\`;
-  }
-}`,
-            timestamp: new Date(Date.now() - 86400000 * 3),
-            likes: ['user-1', 'user-4', 'user-7', 'user-8'],
-            dislikes: [],
-            replies: [
-              {
-                id: 'r3_1',
-                userId: 'user-5',
-                userName: 'Anjali Patel',
-                userAvatar: '👩‍💻',
-                userRole: 'student',
-                content: 'This is gold! Thank you so much. How would you handle custom short URLs?',
-                timestamp: new Date(Date.now() - 86400000 * 2),
-                likes: ['user-6'],
-                dislikes: []
-              },
-              {
-                id: 'r3_2',
-                userId: 'user-6',
-                userName: 'Vikram Singh',
-                userAvatar: '👨‍💻',
-                userRole: 'student',
-                content: `For custom URLs:
-
-1. **Validation**: Check if custom code is available
-2. **Constraints**: 
-   - Min length (3 chars)
-   - Max length (16 chars)
-   - Allowed characters (alphanumeric + - _)
-3. **Reservation**: Users can reserve custom URLs
-4. **Premium Feature**: Consider making it a paid feature
-
-Additional validation:
-- No profanity filter
-- No reserved words (api, admin, etc.)
-- Case insensitive uniqueness`,
-                timestamp: new Date(Date.now() - 86400000),
-                likes: ['user-5'],
-                dislikes: []
-              }
-            ],
-            isSolution: true,
-            isPinned: false
-          },
-          {
-            id: 'r4',
-            userId: 'user-7',
-            userName: 'Dr. Sharma',
-            userAvatar: '👨‍🏫',
-            userRole: 'teacher',
-            userBadges: ['Expert', 'Mentor'],
-            content: `Excellent discussion! Let me add some advanced topics:
-
-## 1. **Database Sharding Strategy**
-
-Shard by short_code first character:
-- Shard 0: 0-3
-- Shard 1: 4-7
-- Shard 2: 8-b
-- Shard 3: c-f
-...
-
-## 2. **Caching Strategy**
-
-Multi-level caching:
-- L1: Local memory cache (per server)
-- L2: Redis cluster
-- L3: Database
-
-## 3. **Handling Redirects**
-
-HTTP Status Codes:
-- 301 (Permanent) - For SEO
-- 302 (Temporary) - For analytics
-
-## 4. **Analytics Pipeline**
-
-\`\`\`
-Redirect → Kafka → Stream Processing → 
-  - Real-time analytics (Redis)
-  - Batch processing (Spark)
-  - Long-term storage (Hadoop)
-\`\`\`
-
-## 5. **Capacity Planning**
-
-For 100M URLs:
-- Storage: 100M * (100 bytes) ≈ 10GB
-- Redirects: 1000/sec peak
-- Bandwidth: ~1MB/sec
-
-Great discussion! Anyone want to tackle rate limiting next?`,
-            timestamp: new Date(Date.now() - 43200000),
-            likes: ['user-1', 'user-5', 'user-6', 'user-8'],
-            dislikes: [],
-            isSolution: false,
-            isPinned: true
-          }
-        ],
-        likes: 67,
-        dislikes: 2,
-        tags: ['system-design', 'scalability', 'database', 'caching'],
-        category: 'system-design',
-        isPinned: true,
-        isLocked: false,
-        isSolved: true,
-        isSticky: false,
-        hasSolution: true,
-        lastActivity: new Date(Date.now() - 3600000),
-        contributors: ['user-6', 'user-7', 'user-8'],
-        attachments: []
-      },
-      {
-        id: '3',
-        topic: 'JavaScript Closures: Understanding the Magic',
-        content: `I've been learning JavaScript and closures are confusing me. Can someone explain:
-
-1. What exactly is a closure?
-2. How do they work under the hood?
-3. Practical use cases
-4. Common pitfalls
-
-I've read the MDN docs but still struggling with practical implementation.`,
-        codeSnippet: `function outer() {
-  let count = 0;
-  
-  return function inner() {
-    count++;
-    console.log(count);
-  }
-}
-
-const counter = outer();
-counter(); // 1
-counter(); // 2
-counter(); // 3`,
-        createdBy: 'user-8',
-        creatorName: 'Neha Gupta',
-        creatorAvatar: '👩‍🎓',
-        creatorRole: 'student',
-        createdAt: new Date(Date.now() - 86400000 * 3),
-        views: 567,
-        replies: [
-          {
-            id: 'r5',
-            userId: 'user-9',
-            userName: 'Rajesh Kumar',
-            userAvatar: '👨‍💻',
-            userRole: 'student',
-            userBadges: ['JS Ninja'],
-            content: `Great question! Let me explain closures in depth:
-
-## What is a Closure?
-
-A closure is a function that has access to its outer function's scope even after the outer function has returned.
-
-## How it Works
-
-When a function is defined in JavaScript, it carries its lexical environment with it. This includes:
-- Local variables
-- Outer function's variables
-- Global variables
-
-## Memory Management
-
-The inner function maintains a reference to the outer variables, preventing garbage collection until the inner function itself is garbage collected.
-
-## Common Use Cases
-
-1. **Data Privacy**
-\`\`\`javascript
-const BankAccount = (initialBalance) => {
-  let balance = initialBalance;
-  
-  return {
-    deposit: (amount) => {
-      balance += amount;
-      return balance;
-    },
-    withdraw: (amount) => {
-      if (amount <= balance) {
-        balance -= amount;
-        return balance;
-      }
-      return 'Insufficient funds';
-    },
-    getBalance: () => balance
-  };
-};
-\`\`\`
-
-2. **Function Factories**
-\`\`\`javascript
-const multiplyBy = (x) => (y) => x * y;
-const double = multiplyBy(2);
-const triple = multiplyBy(3);
-\`\`\`
-
-3. **Event Handlers**
-\`\`\`javascript
-for (let i = 0; i < 5; i++) {
-  setTimeout(() => {
-    console.log(i); // 0,1,2,3,4 (with let)
-  }, 1000);
-}
-\`\`\`
-
-## Common Pitfalls
-
-1. **Memory Leaks**
-\`\`\`javascript
-function heavyFunction() {
-  const bigArray = new Array(1000000);
-  return function() {
-    console.log(bigArray.length);
-  };
-}
-// bigArray never gets GC'd
-\`\`\`
-
-2. **Loop with var**
-\`\`\`javascript
-for (var i = 0; i < 5; i++) {
-  setTimeout(() => {
-    console.log(i); // 5,5,5,5,5
-  }, 1000);
-}
-\`\`\``,
-            timestamp: new Date(Date.now() - 86400000 * 2),
-            likes: ['user-1', 'user-3', 'user-5', 'user-8'],
-            dislikes: [],
-            replies: [
-              {
-                id: 'r5_1',
-                userId: 'user-8',
-                userName: 'Neha Gupta',
-                userAvatar: '👩‍🎓',
-                userRole: 'student',
-                content: 'This is incredibly helpful! The BankAccount example really made it click. Thank you!',
-                timestamp: new Date(Date.now() - 86400000),
-                likes: ['user-9'],
-                dislikes: []
-              }
-            ],
-            isSolution: true,
-            isPinned: false
-          }
-        ],
-        likes: 34,
-        dislikes: 1,
-        tags: ['javascript', 'closures', 'beginner', 'web-dev'],
-        category: 'web-dev',
-        isPinned: false,
-        isLocked: false,
-        isSolved: true,
-        isSticky: false,
-        hasSolution: true,
-        lastActivity: new Date(Date.now() - 86400000),
-        contributors: ['user-9'],
-        attachments: []
-      }
-    ]
-    
-    setDiscussions(sampleDiscussions)
-    setTotalPages(Math.ceil(sampleDiscussions.length / itemsPerPage))
-    setIsLoading(false)
-  }
-
-  const loadUserStats = () => {
-    const stats: UserStats = {
-      topicsCreated: 15,
-      repliesGiven: 127,
-      solutionsMarked: 23,
-      likesReceived: 456,
-      badges: ['Top Contributor', 'Helpful Helper', 'Quick Learner'],
-      reputation: 2345,
-      joinDate: new Date(Date.now() - 86400000 * 365),
-      lastActive: new Date()
+  // Update selectedDiscussion when data changes
+  useEffect(() => {
+    if (selectedDiscussion) {
+      const updated = discussions.find(d => d.id === selectedDiscussion.id)
+      if (updated) setSelectedDiscussion(updated)
     }
-    setUserStats(stats)
+  }, [discussions])
+
+  // ── Utilities ──
+
+  const ft = (d: Date) => d.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  const ftShort = (d: Date) => d.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' })
+  const addLog = (msg: string) => setLogs(prev => [`[${ft(new Date())}] ${msg}`, ...prev.slice(0, 29)])
+
+  const timeAgo = (date: Date): string => {
+    const s = Math.floor((Date.now() - date.getTime()) / 1000)
+    if (s < 60) return `${s}s ago`
+    if (s < 3600) return `${Math.floor(s / 60)}m ago`
+    if (s < 86400) return `${Math.floor(s / 3600)}h ago`
+    if (s < 2592000) return `${Math.floor(s / 86400)}d ago`
+    return `${Math.floor(s / 2592000)}mo ago`
   }
 
-  const handleCreateDiscussion = () => {
-    if (!newDiscussion.topic || !newDiscussion.content) return
-    
-    setIsSubmitting(true)
-    
-    const discussion: Discussion = {
-      id: `disc-${Date.now()}`,
-      topic: newDiscussion.topic,
-      content: newDiscussion.content,
-      codeSnippet: newDiscussion.codeSnippet || undefined,
-      createdBy: currentUser?.id || 'user',
-      creatorName: currentUser?.name || 'User',
-      creatorAvatar: currentUser?.avatar || '👤',
-      creatorRole: currentUser?.role || 'student',
-      creatorBadges: [],
-      createdAt: new Date(),
-      views: 0,
-      replies: [],
-      likes: 0,
-      dislikes: 0,
-      tags: newDiscussion.tags,
-      category: newDiscussion.category,
-      isPinned: false,
-      isLocked: false,
-      isSolved: false,
-      isSticky: false,
-      hasSolution: false,
-      lastActivity: new Date(),
-      contributors: [currentUser?.id || 'user'],
-      attachments: newDiscussion.attachments
-    }
-    
-    setDiscussions([discussion, ...discussions])
-    setShowCreateModal(false)
-    setIsSubmitting(false)
-    
-    // Reset form
-    setNewDiscussion({
-      topic: '',
-      content: '',
-      category: 'general',
-      tags: [],
-      codeSnippet: '',
-      attachments: []
-    })
-  }
+  const roleClass = (role: string) => role === 'teacher' ? 'role-teacher' : role === 'admin' ? 'role-admin' : 'role-student'
 
-  const handleAddReply = (discussionId: string, parentId?: string) => {
-    if (!newReply.trim() && !replyCode.trim()) return
-    
-    setIsSubmitting(true)
-    
-    const reply: Reply = {
-      id: `reply-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
-      userId: currentUser?.id || 'user',
-      userName: currentUser?.name || 'User',
-      userAvatar: currentUser?.avatar || '👤',
-      userRole: currentUser?.role || 'student',
-      userBadges: [],
-      content: newReply,
-      codeSnippet: replyCode || undefined,
-      timestamp: new Date(),
-      likes: [],
-      dislikes: [],
-      parentId: parentId,
-      isEdited: false
-    }
-    
-    setDiscussions(discussions.map(d => {
-      if (d.id === discussionId) {
-        const updatedReplies = parentId 
-          ? addNestedReply(d.replies, parentId, reply)
-          : [...d.replies, reply]
-        
-        return {
-          ...d,
-          replies: updatedReplies,
-          lastActivity: new Date(),
-          contributors: [...new Set([...d.contributors, currentUser?.id || 'user'])]
-        }
-      }
-      return d
-    }))
-    
-    setNewReply('')
-    setReplyCode('')
-    setReplyTo(null)
-    setShowCodeEditor(false)
-    setIsSubmitting(false)
-  }
+  const totalReplies = (replies: Reply[]): number =>
+    replies.reduce((s, r) => s + 1 + totalReplies(r.replies || []), 0)
 
-  const addNestedReply = (replies: Reply[], parentId: string, newReply: Reply): Reply[] => {
-    return replies.map(r => {
-      if (r.id === parentId) {
-        return {
-          ...r,
-          replies: [...(r.replies || []), newReply]
-        }
-      }
-      if (r.replies) {
-        return {
-          ...r,
-          replies: addNestedReply(r.replies, parentId, newReply)
-        }
-      }
-      return r
-    })
-  }
+  // ── Filter / Sort ──
 
-  const handleLike = (discussionId: string, replyId?: string) => {
-    setDiscussions(discussions.map(d => {
-      if (d.id === discussionId) {
-        if (!replyId) {
-          // Like the main discussion
-          return {
-            ...d,
-            likes: d.likes + (d.likes.includes as any ? -1 : 1)
-          }
-        }
-        
-        // Like a reply
-        return {
-          ...d,
-          replies: updateReplyLikes(d.replies, replyId, currentUser?.id || '')
-        }
-      }
-      return d
-    }))
-  }
-
-  const updateReplyLikes = (replies: Reply[], replyId: string, userId: string): Reply[] => {
-    return replies.map(r => {
-      if (r.id === replyId) {
-        const hasLiked = r.likes.includes(userId)
-        return {
-          ...r,
-          likes: hasLiked 
-            ? r.likes.filter(id => id !== userId)
-            : [...r.likes, userId]
-        }
-      }
-      if (r.replies) {
-        return {
-          ...r,
-          replies: updateReplyLikes(r.replies, replyId, userId)
-        }
-      }
-      return r
-    })
-  }
-
-  const handleMarkAsSolution = (discussionId: string, replyId: string) => {
-    setDiscussions(discussions.map(d => {
-      if (d.id === discussionId) {
-        return {
-          ...d,
-          replies: d.replies.map(r => ({
-            ...r,
-            isSolution: r.id === replyId
-          })),
-          hasSolution: true,
-          isSolved: true
-        }
-      }
-      return d
-    }))
-  }
-
-  const handleVote = (discussionId: string, type: 'up' | 'down') => {
-    setDiscussions(discussions.map(d => {
-      if (d.id === discussionId) {
-        return {
-          ...d,
-          likes: type === 'up' ? d.likes + 1 : d.likes,
-          dislikes: type === 'down' ? d.dislikes + 1 : d.dislikes
-        }
-      }
-      return d
-    }))
-  }
-
-  const handleReport = (discussionId: string, reason: string) => {
-    console.log('Reporting discussion:', discussionId, reason)
-    setShowReportModal(false)
-    alert('Thank you for reporting. Our moderators will review this content.')
-  }
-
-  const handleShare = (discussionId: string) => {
-    const url = `${window.location.origin}/discussion/${discussionId}`
-    navigator.clipboard.writeText(url)
-    alert('Link copied to clipboard!')
-    setShowShareModal(false)
-  }
-
-  const handleFollow = (discussionId: string) => {
-    console.log('Following discussion:', discussionId)
-    alert('You will now receive notifications for this discussion')
-  }
-
-  const handleBookmark = (discussionId: string) => {
-    console.log('Bookmarking discussion:', discussionId)
-    alert('Discussion bookmarked!')
-  }
-
-  const filteredDiscussions = discussions
+  const filtered = discussions
     .filter(d => {
-      // Category filter
       if (selectedCategory !== 'all' && d.category !== selectedCategory) return false
-      
-      // Search query
-      if (searchQuery) {
-        const query = searchQuery.toLowerCase()
-        return d.topic.toLowerCase().includes(query) ||
-               d.content.toLowerCase().includes(query) ||
-               d.tags.some(tag => tag.includes(query))
+      if (search) {
+        const q = search.toLowerCase()
+        return d.topic.toLowerCase().includes(q) || d.content.toLowerCase().includes(q) || d.tags.some(t => t.includes(q))
       }
-      
-      // Time filter
       if (timeFilter !== 'all') {
-        const now = Date.now()
-        const day = 86400000
-        const timeRanges = {
-          today: now - day,
-          week: now - day * 7,
-          month: now - day * 30,
-          year: now - day * 365
-        }
-        if (d.createdAt.getTime() < timeRanges[timeFilter]) return false
+        const ranges: Record<string, number> = { today: 86400000, week: 86400000 * 7, month: 86400000 * 30 }
+        if (d.createdAt.getTime() < Date.now() - ranges[timeFilter]) return false
       }
-      
       return true
     })
     .sort((a, b) => {
-      switch (sortBy) {
-        case 'latest':
-          return b.lastActivity.getTime() - a.lastActivity.getTime()
-        case 'popular':
-          return (b.likes + b.views) - (a.likes + a.views)
-        case 'unanswered':
-          return a.replies.length - b.replies.length
-        case 'solved':
-          return (b.hasSolution ? 1 : 0) - (a.hasSolution ? 1 : 0)
-        default:
-          return 0
-      }
+      if (sortBy === 'latest') return b.lastActivity.getTime() - a.lastActivity.getTime()
+      if (sortBy === 'popular') return (b.likes + b.views) - (a.likes + a.views)
+      if (sortBy === 'unanswered') return a.replies.length - b.replies.length
+      if (sortBy === 'solved') return (b.hasSolution ? 1 : 0) - (a.hasSolution ? 1 : 0)
+      return 0
     })
 
-  const paginatedDiscussions = filteredDiscussions.slice(
-    (currentPage - 1) * itemsPerPage,
-    currentPage * itemsPerPage
-  )
+  const totalPages = Math.max(1, Math.ceil(filtered.length / itemsPerPage))
+  const paginated = filtered.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage)
 
-  // Render reply tree recursively
-  const renderReplies = (replies: Reply[], depth: number = 0) => {
+  // ── Actions ──
+
+  const handleCreate = () => {
+    if (!draftTopic.trim() || !draftContent.trim()) return
+    setIsSubmitting(true)
+    const d: Discussion = {
+      id: `d-${Date.now()}`, topic: draftTopic, content: draftContent,
+      codeSnippet: draftCode || undefined,
+      createdBy: 'me', creatorName: 'You', creatorRole: 'student', creatorBadges: [],
+      createdAt: new Date(), views: 0, replies: [],
+      likes: 0, dislikes: 0, tags: draftTags, category: draftCategory,
+      isPinned: false, isLocked: false, isSolved: false, hasSolution: false,
+      lastActivity: new Date(), contributors: ['me']
+    }
+    setDiscussions(prev => [d, ...prev])
+    setStats(prev => ({ ...prev, totalTopics: prev.totalTopics + 1 }))
+    addLog(`POSTED "${draftTopic.substring(0, 30)}"`)
+    setDraftTopic(''); setDraftContent(''); setDraftCode(''); setDraftTags([]); setTagInput('')
+    setIsSubmitting(false)
+    setView('list')
+  }
+
+  const handleAddReply = (discussionId: string) => {
+    if (!newReply.trim() && !replyCode.trim()) return
+    setIsSubmitting(true)
+    const reply: Reply = {
+      id: `r-${Date.now()}`, userId: 'me', userName: 'You', userRole: 'student',
+      content: newReply, codeSnippet: replyCode || undefined,
+      timestamp: new Date(), likes: [], dislikes: [], parentId: replyTo || undefined
+    }
+    setDiscussions(prev => prev.map(d => {
+      if (d.id !== discussionId) return d
+      const updatedReplies = replyTo ? addNestedReply(d.replies, replyTo, reply) : [...d.replies, reply]
+      return {
+        ...d, replies: updatedReplies, lastActivity: new Date(),
+        contributors: [...new Set([...d.contributors, 'me'])]
+      }
+    }))
+    setStats(prev => ({ ...prev, totalReplies: prev.totalReplies + 1 }))
+    addLog(`REPLIED in "${selectedDiscussion?.topic.substring(0, 24)}"`)
+    setNewReply(''); setReplyCode(''); setReplyTo(null); setShowCodeEditor(false)
+    setIsSubmitting(false)
+  }
+
+  const addNestedReply = (replies: Reply[], parentId: string, newR: Reply): Reply[] =>
+    replies.map(r => {
+      if (r.id === parentId) return { ...r, replies: [...(r.replies || []), newR] }
+      if (r.replies) return { ...r, replies: addNestedReply(r.replies, parentId, newR) }
+      return r
+    })
+
+  const handleLikeReply = (discussionId: string, replyId: string) => {
+    setDiscussions(prev => prev.map(d => {
+      if (d.id !== discussionId) return d
+      return { ...d, replies: toggleLike(d.replies, replyId, 'me') }
+    }))
+  }
+
+  const toggleLike = (replies: Reply[], id: string, userId: string): Reply[] =>
+    replies.map(r => {
+      if (r.id === id) {
+        const liked = r.likes.includes(userId)
+        return { ...r, likes: liked ? r.likes.filter(u => u !== userId) : [...r.likes, userId] }
+      }
+      if (r.replies) return { ...r, replies: toggleLike(r.replies, id, userId) }
+      return r
+    })
+
+  const handleMarkSolution = (discussionId: string, replyId: string) => {
+    setDiscussions(prev => prev.map(d => {
+      if (d.id !== discussionId) return d
+      return {
+        ...d, isSolved: true, hasSolution: true,
+        replies: d.replies.map(r => ({ ...r, isSolution: r.id === replyId }))
+      }
+    }))
+    setStats(prev => ({ ...prev, solvedCount: prev.solvedCount + 1 }))
+    addLog(`SOLUTION marked in "${selectedDiscussion?.topic.substring(0, 24)}"`)
+  }
+
+  const handleVoteDiscussion = (id: string, type: 'up' | 'down') => {
+    setDiscussions(prev => prev.map(d =>
+      d.id === id ? { ...d, likes: d.likes + (type === 'up' ? 1 : 0), dislikes: d.dislikes + (type === 'down' ? 1 : 0) } : d
+    ))
+  }
+
+  const openDiscussion = (d: Discussion) => {
+    setSelectedDiscussion(d)
+    setDiscussions(prev => prev.map(p => p.id === d.id ? { ...p, views: p.views + 1 } : p))
+    setView('detail')
+    addLog(`VIEWED "${d.topic.substring(0, 30)}"`)
+  }
+
+  const handleAddTag = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && tagInput.trim()) {
+      setDraftTags(prev => [...prev, tagInput.trim().toLowerCase()])
+      setTagInput('')
+    }
+  }
+
+  // ── Render Reply Tree ──
+
+  const renderReplies = (replies: Reply[], depth = 0): React.ReactNode => {
     return replies.map(reply => (
-      <div key={reply.id} className={`reply-thread depth-${depth}`}>
-        <div className={`reply-item ${reply.isSolution ? 'solution' : ''} ${reply.isPinned ? 'pinned' : ''}`}>
-          <div className="reply-sidebar">
-            <div className="reply-votes">
-              <button className="vote-btn up" onClick={() => handleLike(selectedDiscussion?.id || '', reply.id)}>▲</button>
-              <span className="vote-count">{reply.likes.length - reply.dislikes.length}</span>
-              <button className="vote-btn down">▼</button>
-            </div>
-            {reply.isSolution && <span className="solution-badge">✓ Solution</span>}
+      <div key={reply.id} className={`df-reply-thread depth-${Math.min(depth, 3)}`}>
+        <div className={`df-reply-item ${reply.isSolution ? 'df-reply-solution' : ''} ${reply.isPinned ? 'df-reply-pinned' : ''}`}>
+          {/* Vote Column */}
+          <div className="df-reply-votes">
+            <button className="df-vote-btn" onClick={() => handleLikeReply(selectedDiscussion?.id || '', reply.id)}>▲</button>
+            <span className="df-vote-cnt">{reply.likes.length - reply.dislikes.length}</span>
+            <button className="df-vote-btn">▼</button>
+            {reply.isSolution && <span className="df-sol-badge">SOL</span>}
+            {reply.isPinned && <span className="df-pin-badge">PIN</span>}
           </div>
-          
-          <div className="reply-main">
-            <div className="reply-header">
-              <div className="user-info">
-                <span className="user-avatar">{reply.userAvatar}</span>
-                <span className="user-name">{reply.userName}</span>
-                {reply.userRole === 'teacher' && <span className="role-badge teacher">Teacher</span>}
-                {reply.userRole === 'admin' && <span className="role-badge admin">Admin</span>}
-                {reply.userBadges?.map(badge => (
-                  <span key={badge} className="user-badge">{badge}</span>
-                ))}
+
+          {/* Content */}
+          <div className="df-reply-body">
+            <div className="df-reply-head">
+              <div className="df-reply-user">
+                <span className={`df-rbadge ${roleClass(reply.userRole)}`}>{reply.userRole.toUpperCase()}</span>
+                <span className="df-rname">{reply.userName}</span>
+                <span className="df-rtime">{timeAgo(reply.timestamp)}</span>
+                {reply.isEdited && <span className="df-edited">EDITED</span>}
               </div>
-              <span className="reply-time">
-                {formatTimeAgo(reply.timestamp)}
-                {reply.isEdited && <span className="edited-indicator"> (edited)</span>}
-              </span>
             </div>
-            
-            <div className="reply-content markdown">
-              {reply.content.split('\n').map((line, i) => {
-                if (line.startsWith('##')) {
-                  return <h3 key={i}>{line.replace('##', '').trim()}</h3>
-                }
-                if (line.startsWith('###')) {
-                  return <h4 key={i}>{line.replace('###', '').trim()}</h4>
-                }
-                if (line.match(/^\d\./)) {
-                  return <li key={i}>{line}</li>
-                }
-                if (line.match(/^- /)) {
-                  return <li key={i} className="bullet">{line.replace('- ', '')}</li>
-                }
-                return <p key={i}>{line}</p>
+
+            <div className="df-reply-content">
+              {reply.content.split('\n').filter(l => l).map((line, i) => {
+                if (line.match(/^\d\./)) return <div key={i} className="df-list-item">{line}</div>
+                if (line.startsWith('- ')) return <div key={i} className="df-list-item">{line}</div>
+                return <div key={i} className="df-line">{line}</div>
               })}
             </div>
-            
+
             {reply.codeSnippet && (
-              <div className="reply-code">
-                <pre>
-                  <code>{reply.codeSnippet}</code>
-                </pre>
+              <div className="df-reply-code">
+                <div className="df-code-header">CODE SNIPPET</div>
+                <pre><code>{reply.codeSnippet}</code></pre>
               </div>
             )}
-            
-            {reply.attachments && reply.attachments.length > 0 && (
-              <div className="reply-attachments">
-                {reply.attachments.map(att => (
-                  <div key={att.id} className="attachment-preview">
-                    {att.type === 'image' && <img src={att.url} alt={att.name} />}
-                    <span className="attachment-name">{att.name}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-            
-            <div className="reply-actions">
-              <button 
-                className={`action-btn like ${reply.likes.includes(currentUser?.id || '') ? 'active' : ''}`}
-                onClick={() => handleLike(selectedDiscussion?.id || '', reply.id)}
+
+            <div className="df-reply-acts">
+              <button
+                className={`df-act-btn ${reply.likes.includes('me') ? 'df-act-liked' : ''}`}
+                onClick={() => handleLikeReply(selectedDiscussion?.id || '', reply.id)}
               >
-                👍 {reply.likes.length}
+                {reply.likes.includes('me') ? '▲ ' : '▲ '}{reply.likes.length} LIKES
               </button>
-              <button 
-                className="action-btn reply"
-                onClick={() => {
-                  setReplyTo(reply.id)
-                  setNewReply(`@${reply.userName} `)
-                  editorRef.current?.focus()
-                }}
-              >
-                ↩️ Reply
+              <button className="df-act-btn" onClick={() => {
+                setReplyTo(reply.id)
+                setNewReply(`@${reply.userName} `)
+                editorRef.current?.focus()
+              }}>
+                REPLY
               </button>
-              {currentUser?.role === 'teacher' && !selectedDiscussion?.hasSolution && (
-                <button 
-                  className="action-btn solution"
-                  onClick={() => handleMarkAsSolution(selectedDiscussion?.id || '', reply.id)}
-                >
-                  ✓ Mark as Solution
+              {selectedDiscussion?.creatorRole === 'teacher' && !selectedDiscussion?.hasSolution && (
+                <button className="df-act-btn df-act-sol" onClick={() => handleMarkSolution(selectedDiscussion?.id || '', reply.id)}>
+                  MARK SOLUTION
                 </button>
               )}
-              <button className="action-btn share">🔗 Share</button>
-              <button className="action-btn report">⚑ Report</button>
+              <button className="df-act-btn" onClick={() => { setReportTarget(reply.id); setShowReport(true) }}>REPORT</button>
             </div>
           </div>
         </div>
-        
+
         {reply.replies && reply.replies.length > 0 && (
-          <div className="nested-replies">
-            {renderReplies(reply.replies, depth + 1)}
-          </div>
+          <div className="df-nested">{renderReplies(reply.replies, depth + 1)}</div>
         )}
       </div>
     ))
   }
 
-  const formatTimeAgo = (date: Date) => {
-    const seconds = Math.floor((new Date().getTime() - date.getTime()) / 1000)
-    
-    let interval = seconds / 31536000
-    if (interval > 1) return Math.floor(interval) + ' years ago'
-    
-    interval = seconds / 2592000
-    if (interval > 1) return Math.floor(interval) + ' months ago'
-    
-    interval = seconds / 86400
-    if (interval > 1) return Math.floor(interval) + ' days ago'
-    
-    interval = seconds / 3600
-    if (interval > 1) return Math.floor(interval) + ' hours ago'
-    
-    interval = seconds / 60
-    if (interval > 1) return Math.floor(interval) + ' minutes ago'
-    
-    return Math.floor(seconds) + ' seconds ago'
-  }
+  // ==================== RENDER ====================
 
   return (
-    <div className="discussion-forum">
-      {/* Header Section */}
-      <div className="forum-header">
-        <div className="header-left">
-          <h1>Discussion Forum</h1>
-          <div className="header-stats">
-            <span className="stat">
-              <span className="stat-value">{discussions.length}</span>
-              <span className="stat-label">Topics</span>
-            </span>
-            <span className="stat">
-              <span className="stat-value">
-                {discussions.reduce((acc, d) => acc + d.replies.length, 0)}
-              </span>
-              <span className="stat-label">Replies</span>
-            </span>
-            <span className="stat">
-              <span className="stat-value">
-                {discussions.reduce((acc, d) => acc + d.contributors.length, 0)}
-              </span>
-              <span className="stat-label">Contributors</span>
-            </span>
-            <span className="stat">
-              <span className="stat-value">{deviceInfo.nearbyDevices.length}</span>
-              <span className="stat-label">Online</span>
-            </span>
-          </div>
+    <div className="dfroot">
+
+      {/* ── PAGE HEADER ── */}
+      <div className="df-page-header">
+        <div className="df-page-title">
+          <span className="df-title-text">DISCUSSION FORUM</span>
+          <span className="df-title-sub">OFFLINE ACADEMIC DISCUSSION BOARD • LAN-BASED • END-TO-END ENCRYPTED</span>
         </div>
-        
-        <div className="header-right">
-          <button className="btn btn-primary" onClick={() => setShowCreateModal(true)}>
-            <span className="btn-icon">+</span>
-            New Discussion
-          </button>
+        <div className="df-page-meta">
+          <span className="df-version">v1.0.0</span>
+          <span className="df-time">{ftShort(time)}</span>
+          <div className="df-log-box">
+            <span className="df-log-line">{logs[0] || '[System ready]'}</span>
+          </div>
         </div>
       </div>
 
-      {/* Categories Bar */}
-      <div className="categories-bar">
-        <button 
-          className={`category-chip ${selectedCategory === 'all' ? 'active' : ''}`}
-          onClick={() => setSelectedCategory('all')}
-        >
-          All Topics
-        </button>
-        {categories.map(cat => (
-          <button
-            key={cat.id}
-            className={`category-chip ${selectedCategory === cat.id ? 'active' : ''}`}
-            onClick={() => setSelectedCategory(cat.id)}
-          >
-            <span className="category-icon">{cat.icon}</span>
-            <span className="category-name">{cat.name}</span>
-            <span className="category-count">{cat.count}</span>
-          </button>
+      {/* ── STATS GRID ── */}
+      <div className="df-stats-grid">
+        {[
+          { label: 'TOTAL TOPICS', val: stats.totalTopics, pct: 100 },
+          { label: 'TOTAL REPLIES', val: stats.totalReplies, pct: 72 },
+          { label: 'CONTRIBUTORS', val: stats.totalContributors, pct: 60 },
+          { label: 'SOLVED', val: stats.solvedCount, pct: (stats.solvedCount / Math.max(stats.totalTopics, 1)) * 100 },
+          { label: 'ACTIVE TODAY', val: stats.activeToday, pct: 50 },
+          { label: 'TOTAL VIEWS', val: stats.views, pct: 80 },
+        ].map((s, i) => (
+          <div key={i} className="df-stat-card">
+            <div className="dfsc-head">
+              <span>{s.label}</span>
+              <span className="dfsc-val">{s.val}</span>
+            </div>
+            <div className="dfsc-bar"><div className="dfsc-fill" style={{ width: `${Math.min(s.pct, 100)}%` }} /></div>
+          </div>
         ))}
       </div>
 
-      {/* Filters Bar */}
-      <div className="filters-bar">
-        <div className="search-box">
-          <span className="search-icon">🔍</span>
-          <input
-            type="text"
-            placeholder="Search discussions..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-          />
-          {searchQuery && (
-            <button className="clear-search" onClick={() => setSearchQuery('')}>
-              ×
+      {/* ── MAIN PANEL ── */}
+      <div className="df-main">
+
+        {/* ── SIDEBAR ── */}
+        <aside className="df-sidebar">
+          <div className="df-sb-section">
+            <div className="df-sb-title">NAVIGATION</div>
+            {[
+              { key: 'list', label: 'Discussion List' },
+              { key: 'create', label: 'New Discussion' },
+            ].map(item => (
+              <button key={item.key} className={`df-sb-btn ${view === item.key ? 'df-sb-active' : ''}`}
+                onClick={() => { setView(item.key as any); setSelectedDiscussion(null) }}>
+                <span className="df-sb-arrow">{view === item.key ? '▸' : '·'}</span>
+                {item.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Categories */}
+          <div className="df-sb-section">
+            <div className="df-sb-title">CATEGORIES</div>
+            <button className={`df-cat-btn ${selectedCategory === 'all' ? 'df-cat-active' : ''}`}
+              onClick={() => { setSelectedCategory('all'); setView('list'); setCurrentPage(1) }}>
+              <span>All Topics</span>
+              <span className="df-cat-cnt">{discussions.length}</span>
             </button>
+            {categories.map(cat => (
+              <button key={cat.id} className={`df-cat-btn ${selectedCategory === cat.id ? 'df-cat-active' : ''}`}
+                onClick={() => { setSelectedCategory(cat.id); setView('list'); setCurrentPage(1) }}>
+                <span>{cat.name}</span>
+                <span className="df-cat-cnt">{cat.count}</span>
+              </button>
+            ))}
+          </div>
+
+          {/* Trending Tags */}
+          <div className="df-sb-section">
+            <div className="df-sb-title">TRENDING TAGS</div>
+            <div className="df-tags-cloud">
+              {Array.from(new Set(discussions.flatMap(d => d.tags))).slice(0, 12).map(tag => (
+                <button key={tag} className={`df-tag-chip ${search === tag ? 'df-tag-active' : ''}`}
+                  onClick={() => { setSearch(tag); setView('list') }}>
+                  #{tag}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Activity Log */}
+          <div className="df-sb-section df-sb-flex">
+            <div className="df-sb-title">ACTIVITY LOG</div>
+            <div className="df-sb-logs">
+              {logs.length === 0 ? <div className="df-sb-log-empty">[Awaiting activity]</div>
+                : logs.slice(0, 12).map((l, i) => <div key={i} className="df-sb-log">{l}</div>)}
+            </div>
+          </div>
+        </aside>
+
+        {/* ── CONTENT ── */}
+        <div className="df-content">
+
+          {/* ════════════════ LIST VIEW ════════════════ */}
+          {view === 'list' && (
+            <div className="df-list-view">
+              {/* Toolbar */}
+              <div className="df-toolbar">
+                <input className="df-search" placeholder="Search discussions, topics, tags..."
+                  value={search} onChange={e => setSearch(e.target.value)} />
+                <div className="df-toolbar-right">
+                  <div className="df-filters">
+                    {(['latest', 'popular', 'unanswered', 'solved'] as const).map(f => (
+                      <button key={f} className={`df-fbtn ${sortBy === f ? 'df-factive' : ''}`}
+                        onClick={() => setSortBy(f)}>{f.toUpperCase()}</button>
+                    ))}
+                  </div>
+                  <div className="df-filters">
+                    {(['all', 'today', 'week', 'month'] as const).map(f => (
+                      <button key={f} className={`df-fbtn ${timeFilter === f ? 'df-factive' : ''}`}
+                        onClick={() => setTimeFilter(f)}>{f.toUpperCase()}</button>
+                    ))}
+                  </div>
+                  <button className="df-new-btn" onClick={() => setView('create')}>+ NEW DISCUSSION</button>
+                </div>
+              </div>
+
+              {/* Table header */}
+              <div className="df-table-header">
+                <span>TOPIC</span>
+                <span>CATEGORY</span>
+                <span>AUTHOR</span>
+                <span>TAGS</span>
+                <span>STATUS</span>
+                <span>VIEWS</span>
+                <span>REPLIES</span>
+                <span>LAST ACTIVITY</span>
+              </div>
+              <div className="df-table-body">
+                {paginated.length === 0 && <div className="df-empty">No discussions match your filters</div>}
+                {paginated.map(d => (
+                  <div key={d.id} className={`df-table-row ${d.isPinned ? 'df-row-pinned' : ''} ${d.isSolved ? 'df-row-solved' : ''}`}
+                    onClick={() => openDiscussion(d)}>
+                    <div className="df-row-topic">
+                      <div className="df-row-badges">
+                        {d.isPinned && <span className="df-badge-pin">PINNED</span>}
+                        {d.isSolved && <span className="df-badge-sol">SOLVED</span>}
+                        {d.isLocked && <span className="df-badge-lock">LOCKED</span>}
+                      </div>
+                      <div className="df-row-name">{d.topic}</div>
+                      <div className="df-row-excerpt">{d.content.substring(0, 80).replace(/\n/g, ' ')}...</div>
+                    </div>
+                    <span className="df-row-cat">{d.category}</span>
+                    <div className="df-row-author">
+                      <span className={`df-rbadge ${roleClass(d.creatorRole)}`}>{d.creatorRole.toUpperCase()}</span>
+                      <span>{d.creatorName}</span>
+                    </div>
+                    <div className="df-row-tags">
+                      {d.tags.slice(0, 2).map(tag => (
+                        <span key={tag} className="df-tag">#{tag}</span>
+                      ))}
+                      {d.tags.length > 2 && <span className="df-tag-more">+{d.tags.length - 2}</span>}
+                    </div>
+                    <div className="df-row-status">
+                      <span className={`df-status ${d.hasSolution ? 'df-status-solved' : d.isLocked ? 'df-status-locked' : 'df-status-open'}`}>
+                        {d.hasSolution ? 'SOLVED' : d.isLocked ? 'LOCKED' : 'OPEN'}
+                      </span>
+                    </div>
+                    <span className="df-row-views">{d.views.toLocaleString()}</span>
+                    <span className="df-row-replies">{totalReplies(d.replies)}</span>
+                    <span className="df-row-time">{timeAgo(d.lastActivity)}</span>
+                  </div>
+                ))}
+              </div>
+
+              {/* Table Footer + Pagination */}
+              <div className="df-table-footer">
+                <span>SHOWING {Math.min((currentPage - 1) * itemsPerPage + 1, filtered.length)}–{Math.min(currentPage * itemsPerPage, filtered.length)} OF {filtered.length}</span>
+                <div className="df-pagination">
+                  <button className="df-page-btn" disabled={currentPage === 1} onClick={() => setCurrentPage(p => p - 1)}>←</button>
+                  {Array.from({ length: totalPages }, (_, i) => i + 1)
+                    .filter(p => p === 1 || p === totalPages || Math.abs(p - currentPage) <= 1)
+                    .map((p, idx, arr) => (
+                      <React.Fragment key={p}>
+                        {idx > 0 && arr[idx - 1] !== p - 1 && <span className="df-page-ellipsis">…</span>}
+                        <button className={`df-page-btn ${currentPage === p ? 'df-page-active' : ''}`} onClick={() => setCurrentPage(p)}>{p}</button>
+                      </React.Fragment>
+                    ))}
+                  <button className="df-page-btn" disabled={currentPage === totalPages} onClick={() => setCurrentPage(p => p + 1)}>→</button>
+                </div>
+                <span>{filtered.filter(d => d.isSolved).length} SOLVED / {filtered.filter(d => !d.isSolved).length} OPEN</span>
+              </div>
+            </div>
           )}
-        </div>
-        
-        <div className="filter-controls">
-          <select 
-            className="filter-select"
-            value={sortBy}
-            onChange={(e) => setSortBy(e.target.value as any)}
-          >
-            <option value="latest">Latest</option>
-            <option value="popular">Most Popular</option>
-            <option value="unanswered">Unanswered</option>
-            <option value="solved">Solved</option>
-          </select>
-          
-          <select 
-            className="filter-select"
-            value={timeFilter}
-            onChange={(e) => setTimeFilter(e.target.value as any)}
-          >
-            <option value="all">All Time</option>
-            <option value="today">Today</option>
-            <option value="week">This Week</option>
-            <option value="month">This Month</option>
-            <option value="year">This Year</option>
-          </select>
-          
-          <button 
-            className={`filter-toggle ${showFilters ? 'active' : ''}`}
-            onClick={() => setShowFilters(!showFilters)}
-          >
-            ⚙️ Filters
-          </button>
+
+          {/* ════════════════ DETAIL VIEW ════════════════ */}
+          {view === 'detail' && selectedDiscussion && (
+            <div className="df-detail-view">
+              {/* Nav */}
+              <div className="df-detail-nav">
+                <button className="df-back-btn" onClick={() => { setView('list'); setSelectedDiscussion(null) }}>
+                  ← BACK TO LIST
+                </button>
+                <div className="df-nav-acts">
+                  <button className="df-nav-btn" onClick={() => handleVoteDiscussion(selectedDiscussion.id, 'up')}>
+                    UPVOTE ({selectedDiscussion.likes})
+                  </button>
+                  <button className="df-nav-btn" onClick={() => setShowShare(true)}>SHARE</button>
+                  <button className="df-nav-btn" onClick={() => { setReportTarget(selectedDiscussion.id); setShowReport(true) }}>REPORT</button>
+                </div>
+              </div>
+
+              {/* Discussion Header */}
+              <div className="df-disc-header">
+                <div className="df-disc-badges">
+                  {selectedDiscussion.isPinned && <span className="df-badge-pin">PINNED</span>}
+                  {selectedDiscussion.isSolved && <span className="df-badge-sol">SOLVED</span>}
+                  {selectedDiscussion.isLocked && <span className="df-badge-lock">LOCKED</span>}
+                  <span className="df-badge-cat">{selectedDiscussion.category.toUpperCase()}</span>
+                </div>
+                <div className="df-disc-title">{selectedDiscussion.topic}</div>
+                <div className="df-disc-meta">
+                  <div className="df-disc-author">
+                    <span className={`df-rbadge ${roleClass(selectedDiscussion.creatorRole)}`}>
+                      {selectedDiscussion.creatorRole.toUpperCase()}
+                    </span>
+                    <span className="df-disc-aname">{selectedDiscussion.creatorName}</span>
+                    {selectedDiscussion.creatorBadges.map(b => (
+                      <span key={b} className="df-user-badge">{b}</span>
+                    ))}
+                  </div>
+                  <div className="df-disc-stats">
+                    <span>POSTED {timeAgo(selectedDiscussion.createdAt)}</span>
+                    <span>{selectedDiscussion.views} VIEWS</span>
+                    <span>{totalReplies(selectedDiscussion.replies)} REPLIES</span>
+                    <span>{selectedDiscussion.likes} LIKES</span>
+                    <span>LAST ACTIVE {timeAgo(selectedDiscussion.lastActivity)}</span>
+                  </div>
+                </div>
+                <div className="df-disc-tags">
+                  {selectedDiscussion.tags.map(tag => (
+                    <span key={tag} className="df-tag">#{tag}</span>
+                  ))}
+                </div>
+              </div>
+
+              {/* Discussion Content */}
+              <div className="df-disc-content">
+                <div className="df-content-body">
+                  {selectedDiscussion.content.split('\n').filter(l => l).map((line, i) => {
+                    if (line.match(/^\d\./)) return <div key={i} className="df-list-item">{line}</div>
+                    if (line.startsWith('- ')) return <div key={i} className="df-list-item">{line}</div>
+                    return <div key={i} className="df-line">{line}</div>
+                  })}
+                </div>
+
+                {selectedDiscussion.codeSnippet && (
+                  <div className="df-disc-code">
+                    <div className="df-code-header">CODE SNIPPET</div>
+                    <pre><code>{selectedDiscussion.codeSnippet}</code></pre>
+                  </div>
+                )}
+
+                <div className="df-disc-actions">
+                  <button className="df-act-btn df-act-up" onClick={() => handleVoteDiscussion(selectedDiscussion.id, 'up')}>
+                    ▲ UPVOTE ({selectedDiscussion.likes})
+                  </button>
+                  <button className="df-act-btn" onClick={() => handleVoteDiscussion(selectedDiscussion.id, 'down')}>
+                    ▼ DOWNVOTE ({selectedDiscussion.dislikes})
+                  </button>
+                </div>
+              </div>
+
+              {/* Contributors */}
+              {selectedDiscussion.contributors.length > 0 && (
+                <div className="df-contributors">
+                  <div className="df-section-title">CONTRIBUTORS ({selectedDiscussion.contributors.length})</div>
+                  <div className="df-contrib-list">
+                    {selectedDiscussion.contributors.map(cid => {
+                      const r = selectedDiscussion.replies.find(r => r.userId === cid) ||
+                        selectedDiscussion.replies.flatMap(r => r.replies || []).find(r => r.userId === cid)
+                      const name = cid === 'me' ? 'You' : r?.userName || cid
+                      return (
+                        <div key={cid} className="df-contrib-chip">
+                          <span className="df-contrib-name">{name}</span>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Replies */}
+              <div className="df-replies-section">
+                <div className="df-replies-header">
+                  <div className="df-section-title">{totalReplies(selectedDiscussion.replies)} REPLIES</div>
+                  <select className="df-sort-sel" onChange={() => {}}>
+                    <option value="top">TOP VOTED</option>
+                    <option value="latest">LATEST</option>
+                    <option value="oldest">OLDEST</option>
+                  </select>
+                </div>
+
+                {renderReplies(selectedDiscussion.replies)}
+
+                {/* Add Reply */}
+                {!selectedDiscussion.isLocked && (
+                  <div className="df-add-reply">
+                    <div className="df-section-title">ADD REPLY</div>
+
+                    {replyTo && (
+                      <div className="df-reply-indicator">
+                        REPLYING TO: @{selectedDiscussion.replies.find(r => r.id === replyTo)?.userName ||
+                          selectedDiscussion.replies.flatMap(r => r.replies || []).find(r => r.id === replyTo)?.userName}
+                        <button className="df-cancel-reply" onClick={() => { setReplyTo(null); setNewReply('') }}>×</button>
+                      </div>
+                    )}
+
+                    <textarea
+                      ref={editorRef}
+                      className="df-reply-textarea"
+                      placeholder="Write your reply... Be specific and constructive."
+                      value={newReply}
+                      onChange={e => setNewReply(e.target.value)}
+                      rows={5}
+                    />
+
+                    {showCodeEditor && (
+                      <div className="df-code-editor-wrap">
+                        <div className="df-code-header">CODE SNIPPET</div>
+                        <textarea
+                          className="df-code-textarea"
+                          placeholder="Paste your code here..."
+                          value={replyCode}
+                          onChange={e => setReplyCode(e.target.value)}
+                          rows={8}
+                        />
+                      </div>
+                    )}
+
+                    <div className="df-reply-toolbar">
+                      <button className={`df-toolbar-btn ${showCodeEditor ? 'df-toolbar-active' : ''}`}
+                        onClick={() => setShowCodeEditor(p => !p)}>
+                        CODE SNIPPET
+                      </button>
+                      <button className="df-toolbar-btn" onClick={() => {
+                        const words = ['**bold**', '*italic*', '`code`', '> quote']
+                        setNewReply(p => p + words[0])
+                      }}>BOLD</button>
+                      <button className="df-toolbar-btn" onClick={() => setNewReply(p => p + '\n1. ')}>LIST</button>
+                      <div className="df-toolbar-right">
+                        <span className="df-char-cnt">{newReply.length} chars</span>
+                        <button className="df-submit-btn"
+                          onClick={() => handleAddReply(selectedDiscussion.id)}
+                          disabled={isSubmitting || (!newReply.trim() && !replyCode.trim())}>
+                          {isSubmitting ? 'POSTING...' : 'POST REPLY'}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {selectedDiscussion.isLocked && (
+                  <div className="df-locked-msg">THIS DISCUSSION IS LOCKED — No new replies can be added</div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* ════════════════ CREATE VIEW ════════════════ */}
+          {view === 'create' && (
+            <div className="df-create-view">
+              <div className="df-view-title">NEW DISCUSSION</div>
+              <div className="df-create-layout">
+                {/* Main Form */}
+                <div className="df-create-form">
+                  <div className="df-section-title">DISCUSSION DETAILS</div>
+                  <div className="df-field">
+                    <label>TOPIC TITLE</label>
+                    <input className="df-input" value={draftTopic}
+                      onChange={e => setDraftTopic(e.target.value)}
+                      placeholder="Enter a clear and descriptive title" />
+                  </div>
+                  <div className="df-field">
+                    <label>CATEGORY</label>
+                    <select className="df-input" value={draftCategory} onChange={e => setDraftCategory(e.target.value)}>
+                      {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                    </select>
+                  </div>
+                  <div className="df-field">
+                    <label>CONTENT</label>
+                    <textarea className="df-input df-textarea" rows={10} value={draftContent}
+                      onChange={e => setDraftContent(e.target.value)}
+                      placeholder="Describe your topic in detail. Be specific about what you are asking or sharing. Markdown-style formatting is supported." />
+                  </div>
+                  <div className="df-field">
+                    <label>
+                      CODE SNIPPET (OPTIONAL)
+                      <button className="df-toggle-code-btn" onClick={() => setShowCodeInCreate(p => !p)}>
+                        {showCodeInCreate ? 'HIDE' : 'SHOW'}
+                      </button>
+                    </label>
+                    {showCodeInCreate && (
+                      <textarea className="df-input df-code-input df-textarea" rows={8} value={draftCode}
+                        onChange={e => setDraftCode(e.target.value)}
+                        placeholder="Paste relevant code here..." />
+                    )}
+                  </div>
+                  <div className="df-field">
+                    <label>TAGS (Press Enter to add)</label>
+                    <input className="df-input" value={tagInput}
+                      onChange={e => setTagInput(e.target.value)}
+                      onKeyDown={handleAddTag}
+                      placeholder="e.g., algorithms, javascript, beginner" />
+                    <div className="df-draft-tags">
+                      {draftTags.map(tag => (
+                        <span key={tag} className="df-tag-edit">
+                          #{tag}
+                          <button onClick={() => setDraftTags(prev => prev.filter(t => t !== tag))}>×</button>
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Guidelines + Preview */}
+                <div className="df-create-aside">
+                  <div className="df-guide-panel">
+                    <div className="df-section-title">POSTING GUIDELINES</div>
+                    <div className="df-guide-list">
+                      <div className="df-guide-item"><span className="df-guide-num">01</span><span>Use a clear, specific title that describes your question or topic.</span></div>
+                      <div className="df-guide-item"><span className="df-guide-num">02</span><span>Include code snippets when relevant. Paste complete, runnable examples where possible.</span></div>
+                      <div className="df-guide-item"><span className="df-guide-num">03</span><span>Add relevant tags to help others find your discussion.</span></div>
+                      <div className="df-guide-item"><span className="df-guide-num">04</span><span>Search before posting to avoid duplicates.</span></div>
+                      <div className="df-guide-item"><span className="df-guide-num">05</span><span>Be respectful and constructive in all interactions.</span></div>
+                      <div className="df-guide-item"><span className="df-guide-num">06</span><span>Mark solutions when your question is answered.</span></div>
+                    </div>
+                  </div>
+
+                  <div className="df-preview-panel">
+                    <div className="df-section-title">PREVIEW</div>
+                    <div className="df-preview-title">{draftTopic || '(no title)'}</div>
+                    <div className="df-preview-content">{draftContent.substring(0, 120).replace(/\n/g, ' ')}{draftContent.length > 120 ? '...' : ''}</div>
+                    <div className="df-preview-meta">
+                      <span>{draftCategory}</span>
+                      <span>{draftTags.length} tags</span>
+                      {showCodeInCreate && draftCode && <span>CODE ATTACHED</span>}
+                    </div>
+                  </div>
+
+                  <button className="df-submit-disc-btn"
+                    onClick={handleCreate}
+                    disabled={!draftTopic.trim() || !draftContent.trim() || isSubmitting}>
+                    {isSubmitting ? 'POSTING...' : 'POST DISCUSSION'}
+                  </button>
+                  <button className="df-cancel-disc-btn" onClick={() => setView('list')}>CANCEL</button>
+                </div>
+              </div>
+            </div>
+          )}
+
         </div>
       </div>
 
-      {/* Main Content */}
-      {selectedDiscussion ? (
-        // Discussion Detail View
-        <div className="discussion-detail">
-          {/* Navigation */}
-          <div className="detail-nav">
-            <button className="back-btn" onClick={() => setSelectedDiscussion(null)}>
-              ← Back to Discussions
-            </button>
-            <div className="nav-actions">
-              <button className="nav-btn" onClick={() => handleFollow(selectedDiscussion.id)}>
-                🔔 Follow
-              </button>
-              <button className="nav-btn" onClick={() => handleBookmark(selectedDiscussion.id)}>
-                🔖 Bookmark
-              </button>
-              <button className="nav-btn" onClick={() => setShowShareModal(true)}>
-                🔗 Share
-              </button>
-              <button className="nav-btn" onClick={() => setShowReportModal(true)}>
-                ⚑ Report
-              </button>
+      {/* ── REPORT MODAL ── */}
+      {showReport && (
+        <div className="df-modal-overlay" onClick={() => setShowReport(false)}>
+          <div className="df-modal-box" onClick={e => e.stopPropagation()}>
+            <div className="df-modal-title">REPORT CONTENT</div>
+            <div className="df-modal-sub">Target: {reportTarget}</div>
+            <div className="df-report-options">
+              {['Spam', 'Harassment', 'Inappropriate Content', 'Off Topic', 'Other'].map(r => (
+                <label key={r} className="df-report-opt">
+                  <input type="radio" name="report" value={r.toLowerCase()} />
+                  <span>{r.toUpperCase()}</span>
+                </label>
+              ))}
             </div>
-          </div>
-
-          {/* Discussion Header */}
-          <div className="discussion-header">
-            <h2>{selectedDiscussion.topic}</h2>
-            
-            <div className="discussion-meta">
-              <div className="meta-left">
-                <div className="user-profile">
-                  <span className="user-avatar large">{selectedDiscussion.creatorAvatar}</span>
-                  <div className="user-details">
-                    <span className="user-name">{selectedDiscussion.creatorName}</span>
-                    {selectedDiscussion.creatorRole === 'teacher' && (
-                      <span className="role-badge teacher">Teacher</span>
-                    )}
-                    <div className="user-stats">
-                      <span>Reputation: {userStats?.reputation || 0}</span>
-                      <span>•</span>
-                      <span>Joined {formatTimeAgo(userStats?.joinDate || new Date())}</span>
-                    </div>
-                  </div>
-                </div>
-                
-                <div className="discussion-stats">
-                  <span className="stat">
-                    <span className="stat-icon">👁️</span>
-                    {selectedDiscussion.views} views
-                  </span>
-                  <span className="stat">
-                    <span className="stat-icon">💬</span>
-                    {selectedDiscussion.replies.length} replies
-                  </span>
-                  <span className="stat">
-                    <span className="stat-icon">⭐</span>
-                    {selectedDiscussion.likes} likes
-                  </span>
-                </div>
-              </div>
-              
-              <div className="meta-right">
-                <div className="tags">
-                  {selectedDiscussion.tags.map(tag => (
-                    <span key={tag} className="tag">#{tag}</span>
-                  ))}
-                </div>
-                <span className="timestamp">Posted {formatTimeAgo(selectedDiscussion.createdAt)}</span>
-              </div>
+            <textarea className="df-modal-textarea" rows={3} placeholder="Additional details..." />
+            <div className="df-modal-acts">
+              <button className="df-modal-cancel" onClick={() => setShowReport(false)}>CANCEL</button>
+              <button className="df-modal-submit" onClick={() => { addLog(`REPORT filed`); setShowReport(false) }}>SUBMIT REPORT</button>
             </div>
-          </div>
-
-          {/* Discussion Content */}
-          <div className="discussion-content">
-            <div className="content-body markdown">
-              {selectedDiscussion.content.split('\n').map((line, i) => {
-                if (line.startsWith('#')) {
-                  const level = line.match(/^#+/)[0].length
-                  const text = line.replace(/^#+/, '').trim()
-                  return React.createElement(`h${level}`, { key: i }, text)
-                }
-                if (line.match(/^\d\./)) {
-                  return <li key={i} className="numbered">{line}</li>
-                }
-                if (line.match(/^- /)) {
-                  return <li key={i} className="bullet">{line.replace('- ', '')}</li>
-                }
-                if (line.startsWith('```')) {
-                  // Handle code blocks
-                  return null
-                }
-                return <p key={i}>{line}</p>
-              })}
-            </div>
-            
-            {selectedDiscussion.codeSnippet && (
-              <div className="content-code">
-                <pre>
-                  <code>{selectedDiscussion.codeSnippet}</code>
-                </pre>
-              </div>
-            )}
-            
-            {selectedDiscussion.attachments && selectedDiscussion.attachments.length > 0 && (
-              <div className="content-attachments">
-                <h4>Attachments</h4>
-                <div className="attachment-grid">
-                  {selectedDiscussion.attachments.map(att => (
-                    <div key={att.id} className="attachment-card">
-                      {att.type === 'image' && <img src={att.url} alt={att.name} />}
-                      <span className="attachment-name">{att.name}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-            
-            <div className="content-actions">
-              <button 
-                className={`action-btn large like ${selectedDiscussion.likes > 0 ? 'active' : ''}`}
-                onClick={() => handleVote(selectedDiscussion.id, 'up')}
-              >
-                👍 {selectedDiscussion.likes}
-              </button>
-              <button 
-                className="action-btn large dislike"
-                onClick={() => handleVote(selectedDiscussion.id, 'down')}
-              >
-                👎 {selectedDiscussion.dislikes}
-              </button>
-            </div>
-          </div>
-
-          {/* Contributors */}
-          {selectedDiscussion.contributors.length > 0 && (
-            <div className="contributors-section">
-              <h4>Contributors</h4>
-              <div className="contributors-list">
-                {selectedDiscussion.contributors.map(contributorId => {
-                  const contributor = discussions
-                    .flatMap(d => d.replies)
-                    .find(r => r.userId === contributorId)
-                  return contributor ? (
-                    <div key={contributorId} className="contributor-chip">
-                      <span className="contributor-avatar">{contributor.userAvatar}</span>
-                      <span className="contributor-name">{contributor.userName}</span>
-                    </div>
-                  ) : null
-                })}
-              </div>
-            </div>
-          )}
-
-          {/* Replies Section */}
-          <div className="replies-section">
-            <div className="replies-header">
-              <h3>{selectedDiscussion.replies.length} Replies</h3>
-              <div className="replies-sort">
-                <select defaultValue="top">
-                  <option value="top">Top Votes</option>
-                  <option value="latest">Latest</option>
-                  <option value="oldest">Oldest</option>
-                </select>
-              </div>
-            </div>
-
-            {renderReplies(selectedDiscussion.replies)}
-
-            {/* Add Reply Form */}
-            <div className="add-reply-form">
-              <h4>Add your reply</h4>
-              
-              {replyTo && (
-                <div className="reply-indicator">
-                  Replying to: @{discussions
-                    .flatMap(d => d.replies)
-                    .find(r => r.id === replyTo)?.userName}
-                  <button className="cancel-reply" onClick={() => setReplyTo(null)}>×</button>
-                </div>
-              )}
-              
-              <textarea
-                ref={editorRef}
-                className="reply-textarea"
-                placeholder="Write your reply... (Markdown supported)"
-                value={newReply}
-                onChange={(e) => setNewReply(e.target.value)}
-                rows={6}
-              />
-              
-              {showCodeEditor && (
-                <div className="code-editor">
-                  <textarea
-                    className="code-input"
-                    placeholder="Paste your code here..."
-                    value={replyCode}
-                    onChange={(e) => setReplyCode(e.target.value)}
-                    rows={8}
-                  />
-                </div>
-              )}
-              
-              <div className="reply-toolbar">
-                <button 
-                  className={`toolbar-btn ${showCodeEditor ? 'active' : ''}`}
-                  onClick={() => setShowCodeEditor(!showCodeEditor)}
-                >
-                  &lt;/&gt; Code
-                </button>
-                <button className="toolbar-btn">📎 Attach</button>
-                <button className="toolbar-btn">🔗 Link</button>
-                <button className="toolbar-btn">🖼️ Image</button>
-                <div className="toolbar-right">
-                  <button 
-                    className="btn btn-primary"
-                    onClick={() => handleAddReply(selectedDiscussion.id, replyTo || undefined)}
-                    disabled={isSubmitting || (!newReply.trim() && !replyCode.trim())}
-                  >
-                    {isSubmitting ? 'Posting...' : 'Post Reply'}
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      ) : (
-        // Discussions List View
-        <div className="discussions-view">
-          {isLoading ? (
-            <div className="loading-state">
-              <div className="spinner"></div>
-              <p>Loading discussions...</p>
-            </div>
-          ) : error ? (
-            <div className="error-state">
-              <p>Error: {error}</p>
-              <button className="btn btn-primary" onClick={loadDiscussions}>
-                Try Again
-              </button>
-            </div>
-          ) : (
-            <>
-              <div className={`discussions-grid ${view}`}>
-                {paginatedDiscussions.map(discussion => (
-                  <div 
-                    key={discussion.id} 
-                    className={`discussion-card ${discussion.isPinned ? 'pinned' : ''} ${discussion.isSolved ? 'solved' : ''}`}
-                    onClick={() => setSelectedDiscussion(discussion)}
-                  >
-                    <div className="card-header">
-                      <div className="header-left">
-                        {discussion.isPinned && <span className="pinned-badge">📌 Pinned</span>}
-                        {discussion.isSolved && <span className="solved-badge">✓ Solved</span>}
-                        {discussion.isLocked && <span className="locked-badge">🔒 Locked</span>}
-                      </div>
-                      <span className="category-badge">{discussion.category}</span>
-                    </div>
-                    
-                    <h3 className="card-title">{discussion.topic}</h3>
-                    
-                    <p className="card-excerpt">
-                      {discussion.content.substring(0, 150)}...
-                    </p>
-                    
-                    <div className="card-tags">
-                      {discussion.tags.slice(0, 3).map(tag => (
-                        <span key={tag} className="tag">#{tag}</span>
-                      ))}
-                      {discussion.tags.length > 3 && (
-                        <span className="tag-more">+{discussion.tags.length - 3}</span>
-                      )}
-                    </div>
-                    
-                    <div className="card-footer">
-                      <div className="footer-left">
-                        <span className="author-avatar">{discussion.creatorAvatar}</span>
-                        <span className="author-name">{discussion.creatorName}</span>
-                      </div>
-                      <div className="footer-stats">
-                        <span className="stat" title="Views">👁️ {discussion.views}</span>
-                        <span className="stat" title="Replies">💬 {discussion.replies.length}</span>
-                        <span className="stat" title="Likes">👍 {discussion.likes}</span>
-                        <span className="time">{formatTimeAgo(discussion.lastActivity)}</span>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              {/* Pagination */}
-              {totalPages > 1 && (
-                <div className="pagination">
-                  <button 
-                    className="page-btn"
-                    disabled={currentPage === 1}
-                    onClick={() => setCurrentPage(currentPage - 1)}
-                  >
-                    ←
-                  </button>
-                  
-                  {Array.from({ length: totalPages }, (_, i) => i + 1)
-                    .filter(page => 
-                      page === 1 || 
-                      page === totalPages || 
-                      Math.abs(page - currentPage) <= 2
-                    )
-                    .map((page, index, array) => (
-                      <React.Fragment key={page}>
-                        {index > 0 && array[index - 1] !== page - 1 && (
-                          <span className="page-ellipsis">...</span>
-                        )}
-                        <button 
-                          className={`page-btn ${currentPage === page ? 'active' : ''}`}
-                          onClick={() => setCurrentPage(page)}
-                        >
-                          {page}
-                        </button>
-                      </React.Fragment>
-                    ))}
-                  
-                  <button 
-                    className="page-btn"
-                    disabled={currentPage === totalPages}
-                    onClick={() => setCurrentPage(currentPage + 1)}
-                  >
-                    →
-                  </button>
-                </div>
-              )}
-            </>
-          )}
-        </div>
-      )}
-
-      {/* Create Discussion Modal */}
-      {showCreateModal && (
-        <div className="modal-overlay" onClick={() => setShowCreateModal(false)}>
-          <div className="modal-content large" onClick={e => e.stopPropagation()}>
-            <h2>Create New Discussion</h2>
-            
-            <div className="form-group">
-              <label>Topic</label>
-              <input
-                type="text"
-                value={newDiscussion.topic}
-                onChange={(e) => setNewDiscussion({ ...newDiscussion, topic: e.target.value })}
-                placeholder="Enter a descriptive topic"
-              />
-            </div>
-
-            <div className="form-group">
-              <label>Category</label>
-              <select
-                value={newDiscussion.category}
-                onChange={(e) => setNewDiscussion({ ...newDiscussion, category: e.target.value })}
-              >
-                {categories.map(cat => (
-                  <option key={cat.id} value={cat.id}>{cat.name}</option>
-                ))}
-              </select>
-            </div>
-
-            <div className="form-group">
-              <label>Content</label>
-              <textarea
-                value={newDiscussion.content}
-                onChange={(e) => setNewDiscussion({ ...newDiscussion, content: e.target.value })}
-                placeholder="Describe your topic in detail... (Markdown supported)"
-                rows={8}
-              />
-            </div>
-
-            <div className="form-group">
-              <label>Code Snippet (Optional)</label>
-              <textarea
-                value={newDiscussion.codeSnippet}
-                onChange={(e) => setNewDiscussion({ ...newDiscussion, codeSnippet: e.target.value })}
-                placeholder="Paste any relevant code here..."
-                rows={6}
-                className="code-textarea"
-              />
-            </div>
-
-            <div className="form-group">
-              <label>Tags</label>
-              <div className="tag-input-container">
-                <input
-                  type="text"
-                  value={tagInput}
-                  onChange={(e) => setTagInput(e.target.value)}
-                  onKeyPress={(e) => {
-                    if (e.key === 'Enter' && tagInput.trim()) {
-                      setNewDiscussion({
-                        ...newDiscussion,
-                        tags: [...newDiscussion.tags, tagInput.trim().toLowerCase()]
-                      })
-                      setTagInput('')
-                    }
-                  }}
-                  placeholder="Press Enter to add tags"
-                />
-              </div>
-              <div className="tag-list">
-                {newDiscussion.tags.map(tag => (
-                  <span key={tag} className="tag">
-                    #{tag}
-                    <button onClick={() => setNewDiscussion({
-                      ...newDiscussion,
-                      tags: newDiscussion.tags.filter(t => t !== tag)
-                    })}>×</button>
-                  </span>
-                ))}
-              </div>
-              <small className="helper-text">Common tags: algorithms, javascript, help, question</small>
-            </div>
-
-            <div className="modal-actions">
-              <button className="btn btn-secondary" onClick={() => setShowCreateModal(false)}>
-                Cancel
-              </button>
-              <button 
-                className="btn btn-primary"
-                onClick={handleCreateDiscussion}
-                disabled={!newDiscussion.topic || !newDiscussion.content || isSubmitting}
-              >
-                {isSubmitting ? 'Creating...' : 'Create Discussion'}
-              </button>
-            </div>
+            <button className="df-modal-close" onClick={() => setShowReport(false)}>×</button>
           </div>
         </div>
       )}
 
-      {/* Report Modal */}
-      {showReportModal && (
-        <div className="modal-overlay" onClick={() => setShowReportModal(false)}>
-          <div className="modal-content" onClick={e => e.stopPropagation()}>
-            <h2>Report Discussion</h2>
-            
-            <div className="report-options">
-              <label className="radio-option">
-                <input type="radio" name="report" value="spam" />
-                <span>Spam</span>
-              </label>
-              <label className="radio-option">
-                <input type="radio" name="report" value="harassment" />
-                <span>Harassment</span>
-              </label>
-              <label className="radio-option">
-                <input type="radio" name="report" value="inappropriate" />
-                <span>Inappropriate Content</span>
-              </label>
-              <label className="radio-option">
-                <input type="radio" name="report" value="other" />
-                <span>Other</span>
-              </label>
+      {/* ── SHARE MODAL ── */}
+      {showShare && selectedDiscussion && (
+        <div className="df-modal-overlay" onClick={() => setShowShare(false)}>
+          <div className="df-modal-box" onClick={e => e.stopPropagation()}>
+            <div className="df-modal-title">SHARE DISCUSSION</div>
+            <div className="df-share-link">
+              <input className="df-modal-input" readOnly value={`${typeof window !== 'undefined' ? window.location.origin : 'http://localhost:5173'}/discussion/${selectedDiscussion.id}`} />
+              <button className="df-modal-submit" onClick={() => {
+                typeof navigator !== 'undefined' && navigator.clipboard?.writeText(`http://localhost:5173/discussion/${selectedDiscussion.id}`)
+                addLog(`LINK copied for "${selectedDiscussion.topic.substring(0, 24)}"`)
+                setShowShare(false)
+              }}>COPY LINK</button>
             </div>
-
-            <textarea 
-              className="report-details"
-              placeholder="Provide additional details..."
-              rows={4}
-            />
-
-            <div className="modal-actions">
-              <button className="btn btn-secondary" onClick={() => setShowReportModal(false)}>
-                Cancel
-              </button>
-              <button className="btn btn-primary" onClick={() => handleReport(selectedDiscussion?.id || '', '')}>
-                Submit Report
-              </button>
+            <div className="df-share-meta">
+              <div className="df-sm-row"><span>TOPIC</span><span>{selectedDiscussion.topic.substring(0, 40)}</span></div>
+              <div className="df-sm-row"><span>AUTHOR</span><span>{selectedDiscussion.creatorName}</span></div>
+              <div className="df-sm-row"><span>REPLIES</span><span>{totalReplies(selectedDiscussion.replies)}</span></div>
             </div>
+            <button className="df-modal-close" onClick={() => setShowShare(false)}>×</button>
           </div>
         </div>
       )}
 
-      {/* Share Modal */}
-      {showShareModal && selectedDiscussion && (
-        <div className="modal-overlay" onClick={() => setShowShareModal(false)}>
-          <div className="modal-content small" onClick={e => e.stopPropagation()}>
-            <h2>Share Discussion</h2>
-            
-            <div className="share-options">
-              <div className="share-link">
-                <input 
-                  type="text" 
-                  value={`${window.location.origin}/discussion/${selectedDiscussion.id}`}
-                  readOnly
-                />
-                <button className="btn btn-primary" onClick={() => handleShare(selectedDiscussion.id)}>
-                  Copy Link
-                </button>
-              </div>
-              
-              <div className="share-platforms">
-                <button className="platform-btn twitter">Twitter</button>
-                <button className="platform-btn linkedin">LinkedIn</button>
-                <button className="platform-btn facebook">Facebook</button>
-                <button className="platform-btn email">Email</button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* Scan line */}
+      <div className="df-scan-line" />
 
+      {/* ══════════════════ STYLES ══════════════════ */}
       <style>{`
-        .discussion-forum {
-          max-width: 1200px;
-          margin: 0 auto;
-          padding: 1.5rem;
-        }
-
-        /* Header Styles */
-        .forum-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          margin-bottom: 2rem;
-        }
-
-        .forum-header h1 {
-          font-size: 2rem;
-          color: #ffffff;
-          margin-bottom: 0.5rem;
-        }
-
-        .header-stats {
-          display: flex;
-          gap: 2rem;
-        }
-
-        .stat {
-          display: flex;
-          flex-direction: column;
-        }
-
-        .stat-value {
-          font-size: 1.5rem;
-          font-weight: bold;
-          color: #1e3a5f;
-        }
-
-        .stat-label {
-          font-size: 0.8rem;
-          color: #999999;
-        }
-
-        /* Categories Bar */
-        .categories-bar {
-          display: flex;
-          gap: 0.5rem;
-          overflow-x: auto;
-          padding: 1rem 0;
-          margin-bottom: 1.5rem;
-          border-bottom: 1px solid #2a2a2a;
-        }
-
-        .category-chip {
-          display: flex;
-          align-items: center;
-          gap: 0.5rem;
-          padding: 0.5rem 1rem;
-          background: #1a1a1a;
-          border: 1px solid #2a2a2a;
-          border-radius: 20px;
-          color: #cccccc;
-          cursor: pointer;
-          white-space: nowrap;
-          transition: all 0.2s ease;
-        }
-
-        .category-chip:hover {
-          border-color: #1e3a5f;
-          color: #ffffff;
-        }
-
-        .category-chip.active {
-          background: #1e3a5f;
-          border-color: #1e3a5f;
-          color: #ffffff;
-        }
-
-        .category-icon {
-          font-size: 1rem;
-        }
-
-        .category-count {
-          font-size: 0.7rem;
-          color: #999999;
-        }
-
-        .category-chip.active .category-count {
-          color: #cccccc;
-        }
-
-        /* Filters Bar */
-        .filters-bar {
-          display: flex;
-          gap: 1rem;
-          margin-bottom: 2rem;
-        }
-
-        .search-box {
-          flex: 1;
-          display: flex;
-          align-items: center;
-          background: #1a1a1a;
-          border: 1px solid #2a2a2a;
-          border-radius: 6px;
-          padding: 0 1rem;
-          position: relative;
-        }
-
-        .search-icon {
-          color: #ffffff;
-          margin-right: 0.5rem;
-        }
-
-        .search-box input {
-          flex: 1;
-          background: none;
-          border: none;
-          padding: 0.8rem 0;
-          color: #ffffff;
-          font-size: 0.95rem;
-        }
-
-        .search-box input:focus {
-          outline: none;
-        }
-
-        .clear-search {
-          background: none;
-          border: none;
-          color: #999999;
-          font-size: 1.2rem;
-          cursor: pointer;
-          padding: 0 0.5rem;
-        }
-
-        .filter-controls {
-          display: flex;
-          gap: 0.5rem;
-        }
-
-        .filter-select {
-          background: #1a1a1a;
-          border: 1px solid #2a2a2a;
-          color: #ffffff;
-          padding: 0.5rem 2rem 0.5rem 1rem;
-          border-radius: 4px;
-          font-size: 0.9rem;
-          cursor: pointer;
-          appearance: none;
-          background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23ffffff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
-          background-repeat: no-repeat;
-          background-position: right 0.5rem center;
-        }
-
-        .filter-toggle {
-          background: #1a1a1a;
-          border: 1px solid #2a2a2a;
-          color: #cccccc;
-          padding: 0.5rem 1rem;
-          border-radius: 4px;
-          cursor: pointer;
-        }
-
-        .filter-toggle.active {
-          background: #1e3a5f;
-          border-color: #1e3a5f;
-          color: #ffffff;
-        }
-
-        /* Discussions Grid */
-        .discussions-grid {
-          display: grid;
-          gap: 1rem;
-          margin-bottom: 2rem;
-        }
-
-        .discussions-grid.list {
-          grid-template-columns: 1fr;
-        }
-
-        .discussions-grid.grid {
-          grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
-        }
-
-        .discussion-card {
-          background: #1a1a1a;
-          border: 1px solid #2a2a2a;
-          border-radius: 8px;
-          padding: 1.5rem;
-          cursor: pointer;
-          transition: all 0.2s ease;
-          position: relative;
-        }
-
-        .discussion-card:hover {
-          border-color: #1e3a5f;
-          transform: translateY(-2px);
-        }
-
-        .discussion-card.pinned {
-          border-left: 4px solid #1e3a5f;
-        }
-
-        .discussion-card.solved {
-          border-right: 4px solid #4caf50;
-        }
-
-        .card-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          margin-bottom: 1rem;
-        }
-
-        .pinned-badge,
-        .solved-badge,
-        .locked-badge {
-          font-size: 0.7rem;
-          padding: 0.2rem 0.5rem;
-          border-radius: 4px;
-        }
-
-        .pinned-badge {
-          background: #1e3a5f;
-          color: #ffffff;
-        }
-
-        .solved-badge {
-          background: #4caf50;
-          color: #ffffff;
-        }
-
-        .locked-badge {
-          background: #ff4444;
-          color: #ffffff;
-        }
-
-        .category-badge {
-          font-size: 0.7rem;
-          color: #999999;
-          background: #2a2a2a;
-          padding: 0.2rem 0.5rem;
-          border-radius: 4px;
-        }
-
-        .card-title {
-          font-size: 1.1rem;
-          color: #ffffff;
-          margin-bottom: 0.75rem;
-          line-height: 1.4;
-        }
-
-        .card-excerpt {
-          font-size: 0.9rem;
-          color: #cccccc;
-          margin-bottom: 1rem;
-          line-height: 1.5;
-        }
-
-        .card-tags {
-          display: flex;
-          gap: 0.5rem;
-          flex-wrap: wrap;
-          margin-bottom: 1rem;
-        }
-
-        .tag {
-          background: #2a2a2a;
-          padding: 0.2rem 0.5rem;
-          border-radius: 4px;
-          font-size: 0.7rem;
-          color: #cccccc;
-        }
-
-        .tag-more {
-          font-size: 0.7rem;
-          color: #999999;
-        }
-
-        .card-footer {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          padding-top: 1rem;
-          border-top: 1px solid #2a2a2a;
-        }
-
-        .footer-left {
-          display: flex;
-          align-items: center;
-          gap: 0.5rem;
-        }
-
-        .author-avatar {
-          font-size: 1.2rem;
-        }
-
-        .author-name {
-          font-size: 0.85rem;
-          color: #ffffff;
-        }
-
-        .footer-stats {
-          display: flex;
-          gap: 0.75rem;
-          color: #999999;
-          font-size: 0.8rem;
-        }
-
-        .footer-stats .stat {
-          display: flex;
-          align-items: center;
-          gap: 0.2rem;
-        }
-
-        .time {
-          color: #666666;
-        }
-
-        /* Discussion Detail View */
-        .discussion-detail {
-          background: #1a1a1a;
-          border: 1px solid #2a2a2a;
-          border-radius: 8px;
-          padding: 2rem;
-        }
-
-        .detail-nav {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          margin-bottom: 2rem;
-          padding-bottom: 1rem;
-          border-bottom: 1px solid #2a2a2a;
-        }
-
-        .back-btn {
-          background: none;
-          border: none;
-          color: #1e3a5f;
-          font-size: 0.95rem;
-          cursor: pointer;
-          padding: 0.5rem 1rem;
-          border-radius: 4px;
-        }
-
-        .back-btn:hover {
-          background: #0a0a0a;
-        }
-
-        .nav-actions {
-          display: flex;
-          gap: 0.5rem;
-        }
-
-        .nav-btn {
-          background: none;
-          border: 1px solid #2a2a2a;
-          color: #cccccc;
-          padding: 0.5rem 1rem;
-          border-radius: 4px;
-          cursor: pointer;
-          transition: all 0.2s ease;
-        }
-
-        .nav-btn:hover {
-          border-color: #1e3a5f;
-          color: #ffffff;
-        }
-
-        .discussion-header {
-          margin-bottom: 2rem;
-        }
-
-        .discussion-header h2 {
-          font-size: 1.8rem;
-          color: #ffffff;
-          margin-bottom: 1rem;
-        }
-
-        .discussion-meta {
-          display: flex;
-          justify-content: space-between;
-          align-items: flex-start;
-        }
-
-        .user-profile {
-          display: flex;
-          gap: 1rem;
-          margin-bottom: 1rem;
-        }
-
-        .user-avatar.large {
-          font-size: 3rem;
-        }
-
-        .user-details {
-          display: flex;
-          flex-direction: column;
-          gap: 0.3rem;
-        }
-
-        .user-name {
-          font-size: 1.1rem;
-          font-weight: bold;
-          color: #ffffff;
-        }
-
-        .user-stats {
-          display: flex;
-          gap: 0.5rem;
-          font-size: 0.8rem;
-          color: #999999;
-        }
-
-        .discussion-stats {
-          display: flex;
-          gap: 1.5rem;
-        }
-
-        .discussion-stats .stat {
-          display: flex;
-          align-items: center;
-          gap: 0.3rem;
-          color: #999999;
-          font-size: 0.9rem;
-        }
-
-        .meta-right {
-          text-align: right;
-        }
-
-        .timestamp {
-          display: block;
-          margin-top: 0.5rem;
-          font-size: 0.85rem;
-          color: #666666;
-        }
-
-        .discussion-content {
-          background: #0a0a0a;
-          border-radius: 8px;
-          padding: 2rem;
-          margin-bottom: 2rem;
-        }
-
-        .content-body {
-          line-height: 1.8;
-          margin-bottom: 1.5rem;
-        }
-
-        .content-body h1 {
-          font-size: 1.8rem;
-          margin: 1.5rem 0 1rem;
-        }
-
-        .content-body h2 {
-          font-size: 1.5rem;
-          margin: 1.2rem 0 0.8rem;
-        }
-
-        .content-body h3 {
-          font-size: 1.2rem;
-          margin: 1rem 0 0.5rem;
-        }
-
-        .content-body p {
-          margin: 1rem 0;
-        }
-
-        .content-body li {
-          margin: 0.5rem 0 0.5rem 1.5rem;
-        }
-
-        .content-body li.numbered {
-          list-style-type: decimal;
-        }
-
-        .content-body li.bullet {
-          list-style-type: disc;
-        }
-
-        .content-code {
-          background: #1a1a1a;
-          border: 1px solid #2a2a2a;
-          border-radius: 4px;
-          padding: 1rem;
-          overflow-x: auto;
-          margin: 1.5rem 0;
-        }
-
-        .content-code pre {
-          font-family: 'Monaco', 'Menlo', monospace;
-          font-size: 0.9rem;
-        }
-
-        .content-attachments {
-          margin: 1.5rem 0;
-        }
-
-        .content-attachments h4 {
-          margin-bottom: 1rem;
-          color: #ffffff;
-        }
-
-        .attachment-grid {
-          display: grid;
-          grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-          gap: 1rem;
-        }
-
-        .attachment-card {
-          background: #1a1a1a;
-          border: 1px solid #2a2a2a;
-          border-radius: 4px;
-          padding: 0.5rem;
-          text-align: center;
-        }
-
-        .attachment-card img {
-          max-width: 100%;
-          height: auto;
-          border-radius: 4px;
-          margin-bottom: 0.5rem;
-        }
-
-        .content-actions {
-          display: flex;
-          gap: 1rem;
-          margin-top: 2rem;
-        }
-
-        .action-btn.large {
-          padding: 0.8rem 2rem;
-          font-size: 1rem;
-        }
-
-        /* Contributors Section */
-        .contributors-section {
-          margin: 2rem 0;
-        }
-
-        .contributors-section h4 {
-          margin-bottom: 1rem;
-          color: #ffffff;
-        }
-
-        .contributors-list {
-          display: flex;
-          gap: 0.5rem;
-          flex-wrap: wrap;
-        }
-
-        .contributor-chip {
-          display: flex;
-          align-items: center;
-          gap: 0.5rem;
-          background: #0a0a0a;
-          border: 1px solid #2a2a2a;
-          border-radius: 20px;
-          padding: 0.3rem 1rem;
-        }
-
-        .contributor-avatar {
-          font-size: 1rem;
-        }
-
-        .contributor-name {
-          font-size: 0.85rem;
-          color: #ffffff;
-        }
-
-        /* Replies Section */
-        .replies-section {
-          margin-top: 2rem;
-        }
-
-        .replies-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          margin-bottom: 1.5rem;
-        }
-
-        .replies-header h3 {
-          font-size: 1.2rem;
-          color: #ffffff;
-        }
-
-        .replies-sort select {
-          background: #1a1a1a;
-          border: 1px solid #2a2a2a;
-          color: #ffffff;
-          padding: 0.4rem 2rem 0.4rem 1rem;
-          border-radius: 4px;
-          cursor: pointer;
-        }
-
-        .reply-thread {
-          margin-bottom: 1rem;
-        }
-
-        .reply-thread.depth-1 { margin-left: 3rem; }
-        .reply-thread.depth-2 { margin-left: 6rem; }
-        .reply-thread.depth-3 { margin-left: 9rem; }
-
-        .reply-item {
-          display: flex;
-          gap: 1rem;
-          padding: 1.5rem;
-          background: #0a0a0a;
-          border: 1px solid #2a2a2a;
-          border-radius: 6px;
-          margin-bottom: 1rem;
-        }
-
-        .reply-item.solution {
-          border-left: 4px solid #4caf50;
-          background: #0a1f0a;
-        }
-
-        .reply-item.pinned {
-          border-left: 4px solid #1e3a5f;
-        }
-
-        .reply-sidebar {
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-          gap: 0.5rem;
-          min-width: 60px;
-        }
-
-        .reply-votes {
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-        }
-
-        .vote-btn {
-          background: none;
-          border: none;
-          color: #999999;
-          cursor: pointer;
-          font-size: 1.2rem;
-          padding: 0.2rem;
-        }
-
-        .vote-btn:hover {
-          color: #1e3a5f;
-        }
-
-        .vote-count {
-          font-size: 1rem;
-          font-weight: bold;
-          color: #ffffff;
-        }
-
-        .solution-badge {
-          background: #4caf50;
-          color: #ffffff;
-          padding: 0.2rem 0.5rem;
-          border-radius: 4px;
-          font-size: 0.7rem;
-        }
-
-        .reply-main {
-          flex: 1;
-        }
-
-        .reply-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          margin-bottom: 1rem;
-        }
-
-        .user-info {
-          display: flex;
-          align-items: center;
-          gap: 0.5rem;
-          flex-wrap: wrap;
-        }
-
-        .user-avatar {
-          font-size: 1.5rem;
-        }
-
-        .user-name {
-          font-weight: bold;
-          color: #ffffff;
-        }
-
-        .role-badge {
-          padding: 0.2rem 0.5rem;
-          border-radius: 4px;
-          font-size: 0.7rem;
-        }
-
-        .role-badge.teacher {
-          background: #1e3a5f;
-          color: #ffffff;
-        }
-
-        .role-badge.admin {
-          background: #ff4444;
-          color: #ffffff;
-        }
-
-        .user-badge {
-          background: #2a2a2a;
-          padding: 0.2rem 0.5rem;
-          border-radius: 4px;
-          font-size: 0.7rem;
-          color: #cccccc;
-        }
-
-        .reply-time {
-          font-size: 0.8rem;
-          color: #999999;
-        }
-
-        .edited-indicator {
-          font-style: italic;
-          color: #666666;
-        }
-
-        .reply-content {
-          line-height: 1.6;
-          margin-bottom: 1rem;
-        }
-
-        .reply-content h3 {
-          margin: 1rem 0 0.5rem;
-          color: #ffffff;
-        }
-
-        .reply-content h4 {
-          margin: 0.8rem 0 0.4rem;
-          color: #cccccc;
-        }
-
-        .reply-code {
-          background: #1a1a1a;
-          border: 1px solid #2a2a2a;
-          border-radius: 4px;
-          padding: 1rem;
-          margin: 1rem 0;
-          overflow-x: auto;
-        }
-
-        .reply-code pre {
-          font-family: 'Monaco', 'Menlo', monospace;
-          font-size: 0.85rem;
-        }
-
-        .reply-attachments {
-          display: flex;
-          gap: 1rem;
-          margin: 1rem 0;
-        }
-
-        .attachment-preview {
-          background: #1a1a1a;
-          border: 1px solid #2a2a2a;
-          border-radius: 4px;
-          padding: 0.5rem;
-        }
-
-        .attachment-preview img {
-          max-width: 100px;
-          max-height: 100px;
-          border-radius: 4px;
-        }
-
-        .reply-actions {
-          display: flex;
-          gap: 0.5rem;
-          margin-top: 1rem;
-        }
-
-        .action-btn {
-          background: none;
-          border: none;
-          color: #999999;
-          padding: 0.4rem 1rem;
-          border-radius: 4px;
-          cursor: pointer;
-          font-size: 0.85rem;
-          transition: all 0.2s ease;
-        }
-
-        .action-btn:hover {
-          background: #2a2a2a;
-          color: #ffffff;
-        }
-
-        .action-btn.like.active {
-          color: #ff4444;
-        }
-
-        .action-btn.solution {
-          color: #4caf50;
-        }
-
-        .nested-replies {
-          margin-left: 2rem;
-        }
-
-        /* Add Reply Form */
-        .add-reply-form {
-          margin-top: 2rem;
-          padding: 1.5rem;
-          background: #0a0a0a;
-          border: 1px solid #2a2a2a;
-          border-radius: 6px;
-        }
-
-        .add-reply-form h4 {
-          margin-bottom: 1rem;
-          color: #ffffff;
-        }
-
-        .reply-indicator {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          background: #1e3a5f;
-          padding: 0.5rem 1rem;
-          border-radius: 4px;
-          margin-bottom: 1rem;
-          font-size: 0.9rem;
-        }
-
-        .cancel-reply {
-          background: none;
-          border: none;
-          color: #ffffff;
-          font-size: 1.2rem;
-          cursor: pointer;
-        }
-
-        .reply-textarea {
-          width: 100%;
-          background: #1a1a1a;
-          border: 1px solid #2a2a2a;
-          border-radius: 4px;
-          color: #ffffff;
-          padding: 1rem;
-          margin-bottom: 1rem;
-          resize: vertical;
-          font-family: inherit;
-        }
-
-        .code-editor {
-          margin-bottom: 1rem;
-        }
-
-        .code-input {
-          width: 100%;
-          background: #1a1a1a;
-          border: 1px solid #2a2a2a;
-          border-radius: 4px;
-          color: #ffffff;
-          padding: 1rem;
-          font-family: 'Monaco', 'Menlo', monospace;
-          font-size: 0.9rem;
-          resize: vertical;
-        }
-
-        .reply-toolbar {
-          display: flex;
-          gap: 0.5rem;
-          align-items: center;
-        }
-
-        .toolbar-btn {
-          background: none;
-          border: 1px solid #2a2a2a;
-          color: #cccccc;
-          padding: 0.5rem 1rem;
-          border-radius: 4px;
-          cursor: pointer;
-          transition: all 0.2s ease;
-        }
-
-        .toolbar-btn:hover {
-          border-color: #1e3a5f;
-          color: #ffffff;
-        }
-
-        .toolbar-btn.active {
-          background: #1e3a5f;
-          border-color: #1e3a5f;
-          color: #ffffff;
-        }
-
-        .toolbar-right {
-          margin-left: auto;
-        }
-
-        /* Pagination */
-        .pagination {
-          display: flex;
-          justify-content: center;
-          align-items: center;
-          gap: 0.5rem;
-          margin-top: 2rem;
-        }
-
-        .page-btn {
-          background: #1a1a1a;
-          border: 1px solid #2a2a2a;
-          color: #cccccc;
-          width: 36px;
-          height: 36px;
-          border-radius: 4px;
-          cursor: pointer;
-          transition: all 0.2s ease;
-        }
-
-        .page-btn:hover:not(:disabled) {
-          border-color: #1e3a5f;
-          color: #ffffff;
-        }
-
-        .page-btn.active {
-          background: #1e3a5f;
-          border-color: #1e3a5f;
-          color: #ffffff;
-        }
-
-        .page-btn:disabled {
-          opacity: 0.5;
-          cursor: not-allowed;
-        }
-
-        .page-ellipsis {
-          color: #999999;
-          padding: 0 0.5rem;
-        }
-
-        /* Loading & Error States */
-        .loading-state,
-        .error-state {
-          text-align: center;
-          padding: 3rem;
-          color: #999999;
-        }
-
-        .spinner {
-          width: 40px;
-          height: 40px;
-          border: 3px solid #2a2a2a;
-          border-top-color: #1e3a5f;
-          border-radius: 50%;
-          animation: spin 1s linear infinite;
-          margin: 0 auto 1rem;
-        }
-
-        @keyframes spin {
-          to { transform: rotate(360deg); }
-        }
-
-        /* Modal Styles */
-        .modal-overlay {
-          position: fixed;
-          top: 0;
-          left: 0;
-          right: 0;
-          bottom: 0;
-          background: rgba(0, 0, 0, 0.8);
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          z-index: 1000;
-        }
-
-        .modal-content {
-          background: #1a1a1a;
-          border: 1px solid #2a2a2a;
-          border-radius: 8px;
-          padding: 2rem;
-          max-width: 600px;
-          width: 90%;
-          max-height: 80vh;
-          overflow-y: auto;
-        }
-
-        .modal-content.large {
-          max-width: 800px;
-        }
-
-        .modal-content.small {
-          max-width: 400px;
-        }
-
-        .modal-content h2 {
-          margin-bottom: 1.5rem;
-          color: #ffffff;
-        }
-
-        .form-group {
-          margin-bottom: 1.5rem;
-        }
-
-        .form-group label {
-          display: block;
-          margin-bottom: 0.5rem;
-          color: #cccccc;
-          font-size: 0.9rem;
-        }
-
-        .form-group input,
-        .form-group textarea,
-        .form-group select {
-          width: 100%;
-          padding: 0.8rem;
-          background: #0a0a0a;
-          border: 1px solid #2a2a2a;
-          border-radius: 4px;
-          color: #ffffff;
-          font-size: 0.95rem;
-        }
-
-        .form-group input:focus,
-        .form-group textarea:focus,
-        .form-group select:focus {
-          outline: none;
-          border-color: #1e3a5f;
-        }
-
-        .code-textarea {
-          font-family: 'Monaco', 'Menlo', monospace;
-          font-size: 0.9rem;
-        }
-
-        .tag-input-container {
-          margin-bottom: 0.5rem;
-        }
-
-        .helper-text {
-          display: block;
-          margin-top: 0.5rem;
-          color: #666666;
-          font-size: 0.8rem;
-        }
-
-        .report-options {
-          display: flex;
-          flex-direction: column;
-          gap: 0.5rem;
-          margin-bottom: 1rem;
-        }
-
-        .radio-option {
-          display: flex;
-          align-items: center;
-          gap: 0.5rem;
-          color: #cccccc;
-          cursor: pointer;
-        }
-
-        .report-details {
-          width: 100%;
-          background: #0a0a0a;
-          border: 1px solid #2a2a2a;
-          border-radius: 4px;
-          color: #ffffff;
-          padding: 0.8rem;
-          margin: 1rem 0;
-          resize: vertical;
-        }
-
-        .share-link {
-          display: flex;
-          gap: 0.5rem;
-          margin-bottom: 1rem;
-        }
-
-        .share-link input {
-          flex: 1;
-          background: #0a0a0a;
-          border: 1px solid #2a2a2a;
-          border-radius: 4px;
-          color: #ffffff;
-          padding: 0.6rem;
-        }
-
-        .share-platforms {
-          display: grid;
-          grid-template-columns: repeat(2, 1fr);
-          gap: 0.5rem;
-        }
-
-        .platform-btn {
-          background: #0a0a0a;
-          border: 1px solid #2a2a2a;
-          color: #ffffff;
-          padding: 0.6rem;
-          border-radius: 4px;
-          cursor: pointer;
-        }
-
-        .platform-btn:hover {
-          border-color: #1e3a5f;
-        }
-
-        .modal-actions {
-          display: flex;
-          justify-content: flex-end;
-          gap: 1rem;
-          margin-top: 2rem;
-        }
-
-        /* Scrollbar */
-        ::-webkit-scrollbar {
-          width: 8px;
-          height: 8px;
-        }
-
-        ::-webkit-scrollbar-track {
-          background: #1a1a1a;
-        }
-
-        ::-webkit-scrollbar-thumb {
-          background: #2a2a2a;
-          border-radius: 4px;
-        }
-
-        ::-webkit-scrollbar-thumb:hover {
-          background: #1e3a5f;
-        }
+        * { margin:0; padding:0; box-sizing:border-box; }
+
+        .dfroot {
+          min-height:calc(100vh - 56px);
+          background:#030303; color:#ffffff;
+          font-family:'SF Mono','Monaco','Fira Code',monospace;
+          font-size:11px; display:flex; flex-direction:column;
+          gap:1px; position:relative; overflow-x:hidden; overflow-y:auto;
+        }
+        .dfroot::-webkit-scrollbar{width:4px}
+        .dfroot::-webkit-scrollbar-track{background:#111}
+        .dfroot::-webkit-scrollbar-thumb{background:#222}
+        .dfroot::-webkit-scrollbar-thumb:hover{background:#1e3a5f}
+        *{scrollbar-width:thin;scrollbar-color:#222 #111}
+
+        /* ── PAGE HEADER ── */
+        .df-page-header{background:#0a0a0a;border:1px solid #1e3a5f;padding:12px 20px;display:flex;justify-content:space-between;align-items:center;position:relative;overflow:hidden;flex-shrink:0}
+        .df-page-header::before{content:'';position:absolute;top:0;left:-100%;width:100%;height:2px;background:linear-gradient(90deg,transparent,#1e3a5f,transparent);animation:dfscan 3s linear infinite}
+        @keyframes dfscan{0%{left:-100%}100%{left:100%}}
+        .df-page-title{display:flex;flex-direction:column;gap:3px}
+        .df-title-text{color:#1e3a5f;font-size:18px;font-weight:700;letter-spacing:3px;text-shadow:0 0 8px #1e3a5f}
+        .df-title-sub{font-size:8px;opacity:0.35;letter-spacing:2px}
+        .df-page-meta{display:flex;align-items:center;gap:14px;background:#050505;padding:6px 12px;border:1px solid #1e3a5f}
+        .df-version{color:#1e3a5f;font-size:9px}
+        .df-time{font-size:10px}
+        .df-log-box{border-left:1px solid #1e3a5f;padding-left:12px}
+        .df-log-line{font-size:9px;opacity:0.7;animation:dffade 0.3s ease}
+        @keyframes dffade{from{opacity:0;transform:translateX(8px)}to{opacity:1;transform:translateX(0)}}
+
+        /* ── STATS ── */
+        .df-stats-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:1px;background:#1e3a5f;border:1px solid #1e3a5f;flex-shrink:0}
+        .df-stat-card{background:#0a0a0a;padding:12px 14px;display:flex;flex-direction:column;gap:6px;transition:transform 0.2s,box-shadow 0.2s}
+        .df-stat-card:hover{transform:translateY(-2px);box-shadow:0 4px 18px rgba(30,58,95,0.3)}
+        .dfsc-head{display:flex;justify-content:space-between;align-items:center;padding-bottom:5px;border-bottom:1px solid #1e3a5f}
+        .dfsc-head span:first-child{font-size:9px;opacity:0.6;letter-spacing:0.5px}
+        .dfsc-val{font-size:14px;font-weight:700}
+        .dfsc-bar{height:2px;background:#1a1a1a;overflow:hidden}
+        .dfsc-fill{height:100%;background:#1e3a5f;transition:width 0.5s}
+
+        /* ── MAIN ── */
+        .df-main{display:flex;flex:1;gap:1px;background:#1e3a5f;border:1px solid #1e3a5f;min-height:0}
+
+        /* ── SIDEBAR ── */
+        .df-sidebar{width:240px;min-width:240px;background:#0a0a0a;display:flex;flex-direction:column;overflow-y:auto}
+        .df-sidebar::-webkit-scrollbar{width:4px}
+        .df-sidebar::-webkit-scrollbar-track{background:#111}
+        .df-sidebar::-webkit-scrollbar-thumb{background:#222}
+        .df-sidebar::-webkit-scrollbar-thumb:hover{background:#1e3a5f}
+        .df-sb-section{padding:12px 14px;border-bottom:1px solid #1e3a5f;flex-shrink:0}
+        .df-sb-flex{flex:1}
+        .df-sb-title{font-size:7px;letter-spacing:1.5px;opacity:0.35;margin-bottom:8px}
+        .df-sb-btn{width:100%;background:none;border:none;color:#fff;font-family:inherit;font-size:10px;padding:7px 0;text-align:left;cursor:pointer;opacity:0.5;display:flex;align-items:center;gap:7px;transition:opacity 0.15s;border-bottom:1px dotted #111}
+        .df-sb-btn:hover{opacity:0.85}
+        .df-sb-btn.df-sb-active{opacity:1}
+        .df-sb-arrow{color:#1e3a5f;font-size:10px;width:10px}
+        .df-cat-btn{width:100%;background:none;border:none;color:#fff;font-family:inherit;font-size:9px;padding:5px 0;text-align:left;cursor:pointer;opacity:0.5;display:flex;justify-content:space-between;align-items:center;border-bottom:1px dotted #111;transition:opacity 0.15s}
+        .df-cat-btn:hover{opacity:0.85}
+        .df-cat-btn.df-cat-active{opacity:1;color:#6ab4ff}
+        .df-cat-cnt{font-size:8px;opacity:0.4;background:#111;padding:1px 5px;border-radius:2px}
+        .df-tags-cloud{display:flex;flex-wrap:wrap;gap:4px}
+        .df-tag-chip{background:none;border:1px solid #111;color:#fff;font-family:inherit;font-size:7px;padding:2px 6px;cursor:pointer;opacity:0.5;transition:all 0.15s;border-radius:1px}
+        .df-tag-chip:hover{opacity:0.85;border-color:#1e3a5f}
+        .df-tag-chip.df-tag-active{opacity:1;border-color:#1e3a5f;background:rgba(30,58,95,0.2)}
+        .df-sb-logs{display:flex;flex-direction:column;gap:2px;max-height:140px;overflow-y:auto}
+        .df-sb-log{font-size:8px;opacity:0.5;padding:2px 0;border-bottom:1px dotted #0d0d0d;font-family:monospace}
+        .df-sb-log-empty{font-size:8px;opacity:0.2;font-style:italic}
+
+        /* ── CONTENT ── */
+        .df-content{flex:1;background:#0a0a0a;overflow-y:auto;padding:20px;min-width:0}
+        .df-content::-webkit-scrollbar{width:4px}
+        .df-content::-webkit-scrollbar-track{background:#111}
+        .df-content::-webkit-scrollbar-thumb{background:#222}
+        .df-content::-webkit-scrollbar-thumb:hover{background:#1e3a5f}
+        .df-view-title{font-size:13px;font-weight:700;letter-spacing:2px;margin-bottom:16px;border-left:3px solid #1e3a5f;padding-left:10px}
+        .df-section-title{font-size:8px;letter-spacing:1.5px;opacity:0.35;margin-bottom:8px}
+
+        /* ── TOOLBAR ── */
+        .df-toolbar{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap}
+        .df-toolbar-right{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+        .df-search{background:#0e0e0e;border:1px solid #1e3a5f;color:#fff;padding:6px 12px;font-size:10px;font-family:inherit;outline:none;width:240px;transition:border-color 0.2s}
+        .df-search:focus{border-color:rgba(255,255,255,0.3)}
+        .df-search::placeholder{opacity:0.28}
+        .df-filters{display:flex;gap:3px}
+        .df-fbtn{background:none;border:1px solid #141414;color:#fff;opacity:0.4;font-size:7px;padding:3px 8px;cursor:pointer;font-family:inherit;letter-spacing:0.5px;transition:all 0.15s}
+        .df-fbtn:hover{opacity:0.75}
+        .df-fbtn.df-factive{opacity:1;border-color:#1e3a5f;background:rgba(30,58,95,0.18)}
+        .df-new-btn{background:#1e3a5f;border:none;color:#fff;padding:5px 14px;font-size:9px;cursor:pointer;font-family:inherit;letter-spacing:1px;transition:background 0.2s}
+        .df-new-btn:hover{background:#2a4a7a}
+
+        /* ── TABLE ── */
+        .df-table-header{display:grid;grid-template-columns:3fr 90px 110px 120px 70px 60px 60px 90px;padding:6px 10px;background:#070707;border:1px solid #1e3a5f;border-bottom:none;font-size:7px;letter-spacing:1px;opacity:0.45}
+        .df-table-body{border:1px solid #1e3a5f}
+        .df-table-row{display:grid;grid-template-columns:3fr 90px 110px 120px 70px 60px 60px 90px;padding:10px;border-bottom:1px solid #0d0d0d;align-items:center;font-size:9px;cursor:pointer;transition:background 0.15s}
+        .df-table-row:hover{background:#0e0e0e}
+        .df-table-row:last-child{border-bottom:none}
+        .df-row-pinned{border-left:3px solid #1e3a5f}
+        .df-row-solved{border-right:3px solid rgba(109,186,114,0.5)}
+        .df-empty{padding:30px;text-align:center;opacity:0.25;font-size:10px}
+        .df-row-topic{display:flex;flex-direction:column;gap:3px;min-width:0}
+        .df-row-badges{display:flex;gap:4px;margin-bottom:2px}
+        .df-badge-pin{font-size:6px;padding:1px 5px;background:rgba(30,58,95,0.4);border:1px solid #1e3a5f;color:#6ab4ff;letter-spacing:0.5px}
+        .df-badge-sol{font-size:6px;padding:1px 5px;background:rgba(74,144,80,0.3);border:1px solid rgba(109,186,114,0.4);color:#6dba72;letter-spacing:0.5px}
+        .df-badge-lock{font-size:6px;padding:1px 5px;background:rgba(180,60,60,0.2);border:1px solid rgba(200,96,96,0.3);color:#c86060;letter-spacing:0.5px}
+        .df-badge-cat{font-size:6px;padding:1px 5px;background:#0d0d0d;border:1px solid #111;opacity:0.6;letter-spacing:0.5px}
+        .df-row-name{font-size:10px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+        .df-row-excerpt{font-size:7px;opacity:0.4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+        .df-row-cat{font-size:8px;opacity:0.55}
+        .df-row-author{display:flex;flex-direction:column;gap:3px}
+        .df-row-tags{display:flex;gap:3px;flex-wrap:wrap}
+        .df-tag{font-size:7px;padding:1px 5px;background:#111;border:1px solid #1a1a1a;opacity:0.7;white-space:nowrap}
+        .df-tag-more{font-size:7px;opacity:0.35}
+        .df-row-status{}
+        .df-status{font-size:7px;padding:2px 5px;letter-spacing:0.5px}
+        .df-status-solved{background:rgba(74,144,80,0.2);color:#6dba72}
+        .df-status-locked{background:rgba(180,60,60,0.2);color:#c86060}
+        .df-status-open{background:rgba(30,58,95,0.3);color:#6ab4ff}
+        .df-row-views,.df-row-replies{font-size:9px;font-family:monospace}
+        .df-row-time{font-size:8px;opacity:0.45;font-family:monospace}
+        .df-table-footer{display:flex;justify-content:space-between;align-items:center;padding:8px 10px;background:#070707;border:1px solid #1e3a5f;border-top:none;font-size:7px;opacity:0.45;letter-spacing:0.5px}
+        .df-pagination{display:flex;gap:3px;align-items:center}
+        .df-page-btn{background:none;border:1px solid #1a1a1a;color:#fff;font-size:9px;width:24px;height:24px;cursor:pointer;font-family:inherit;transition:all 0.15s;display:flex;align-items:center;justify-content:center}
+        .df-page-btn:hover:not(:disabled){border-color:#1e3a5f;background:rgba(30,58,95,0.18)}
+        .df-page-btn.df-page-active{background:#1e3a5f;border-color:#1e3a5f}
+        .df-page-btn:disabled{opacity:0.3;cursor:not-allowed}
+        .df-page-ellipsis{font-size:9px;opacity:0.35;padding:0 2px}
+
+        /* ── ROLE BADGES ── */
+        .df-rbadge{font-size:6px;padding:1px 5px;border-radius:1px;font-weight:700;letter-spacing:0.5px;flex-shrink:0}
+        .role-teacher{background:rgba(30,58,95,0.5);color:#6ab4ff;border:1px solid rgba(30,58,95,0.5)}
+        .role-admin{background:rgba(180,60,60,0.3);color:#c86060;border:1px solid rgba(200,96,96,0.2)}
+        .role-student{background:rgba(80,80,80,0.3);color:#aaa;border:1px solid #333}
+        .df-user-badge{font-size:6px;padding:1px 5px;background:#111;border:1px solid #1a1a1a;opacity:0.6;letter-spacing:0.3px}
+
+        /* ── DETAIL VIEW ── */
+        .df-detail-view{display:flex;flex-direction:column;gap:14px}
+        .df-detail-nav{display:flex;justify-content:space-between;align-items:center}
+        .df-back-btn{background:none;border:1px solid #1a1a1a;color:#fff;padding:5px 12px;font-size:8px;cursor:pointer;font-family:inherit;letter-spacing:0.5px;transition:border-color 0.2s}
+        .df-back-btn:hover{border-color:#1e3a5f}
+        .df-nav-acts{display:flex;gap:6px}
+        .df-nav-btn{background:none;border:1px solid #1a1a1a;color:#fff;padding:5px 12px;font-size:8px;cursor:pointer;font-family:inherit;letter-spacing:0.5px;transition:all 0.15s}
+        .df-nav-btn:hover{border-color:#1e3a5f;background:rgba(30,58,95,0.1)}
+        .df-disc-header{background:#090909;border:1px solid #1e3a5f;padding:16px}
+        .df-disc-badges{display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap}
+        .df-disc-title{font-size:16px;font-weight:700;line-height:1.4;margin-bottom:10px}
+        .df-disc-meta{display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px}
+        .df-disc-author{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+        .df-disc-aname{font-size:10px;font-weight:600}
+        .df-disc-stats{display:flex;gap:14px;font-size:8px;opacity:0.45;flex-wrap:wrap}
+        .df-disc-tags{display:flex;gap:5px;flex-wrap:wrap;margin-top:8px}
+        .df-disc-content{background:#090909;border:1px solid #1e3a5f;padding:16px;display:flex;flex-direction:column;gap:12px}
+        .df-content-body{line-height:1.7;font-size:10px}
+        .df-line{padding:2px 0}
+        .df-list-item{padding:2px 0 2px 12px;opacity:0.85}
+        .df-disc-code,.df-reply-code{background:#070707;border:1px solid #111;overflow-x:auto}
+        .df-code-header{font-size:7px;opacity:0.4;letter-spacing:1px;padding:5px 10px;border-bottom:1px solid #111;background:#060606}
+        .df-disc-code pre,.df-reply-code pre{padding:12px;font-size:9px;line-height:1.6;font-family:'SF Mono','Monaco','Fira Code',monospace}
+        .df-disc-actions{display:flex;gap:8px;margin-top:4px}
+        .df-act-btn{background:none;border:1px solid #1a1a1a;color:#fff;padding:5px 12px;font-size:8px;cursor:pointer;font-family:inherit;letter-spacing:0.5px;transition:all 0.15s}
+        .df-act-btn:hover{border-color:#1e3a5f;background:rgba(30,58,95,0.1)}
+        .df-act-liked{color:#6ab4ff;border-color:#1e3a5f}
+        .df-act-up{background:rgba(30,58,95,0.2);border-color:#1e3a5f}
+        .df-act-sol{color:#6dba72;border-color:rgba(109,186,114,0.3)}
+        .df-act-sol:hover{background:rgba(74,144,80,0.1)}
+        .df-contributors{background:#090909;border:1px solid #1e3a5f;padding:12px}
+        .df-contrib-list{display:flex;gap:6px;flex-wrap:wrap}
+        .df-contrib-chip{background:#0e0e0e;border:1px solid #111;padding:3px 10px;font-size:8px}
+        .df-contrib-name{opacity:0.7}
+
+        /* ── REPLIES ── */
+        .df-replies-section{display:flex;flex-direction:column;gap:10px}
+        .df-replies-header{display:flex;justify-content:space-between;align-items:center}
+        .df-sort-sel{background:#0e0e0e;border:1px solid #1a1a1a;color:#fff;padding:3px 8px;font-size:8px;font-family:inherit;outline:none;cursor:pointer}
+        .df-reply-thread{margin-bottom:8px}
+        .depth-1{margin-left:24px}
+        .depth-2{margin-left:48px}
+        .depth-3{margin-left:72px}
+        .df-reply-item{display:flex;gap:10px;padding:12px;background:#090909;border:1px solid #111;border-radius:1px;transition:border-color 0.15s}
+        .df-reply-item:hover{border-color:#1e3a5f}
+        .df-reply-solution{border-left:3px solid rgba(109,186,114,0.5);background:rgba(74,144,80,0.04)}
+        .df-reply-pinned{border-left:3px solid #1e3a5f;background:rgba(30,58,95,0.04)}
+        .df-reply-votes{display:flex;flex-direction:column;align-items:center;gap:3px;flex-shrink:0;width:36px}
+        .df-vote-btn{background:none;border:none;color:#555;cursor:pointer;font-size:11px;padding:1px;transition:color 0.15s}
+        .df-vote-btn:hover{color:#6ab4ff}
+        .df-vote-cnt{font-size:11px;font-weight:700;font-family:monospace}
+        .df-sol-badge{font-size:6px;color:#6dba72;border:1px solid rgba(109,186,114,0.3);padding:1px 3px;text-align:center}
+        .df-pin-badge{font-size:6px;color:#6ab4ff;border:1px solid rgba(106,180,255,0.3);padding:1px 3px;text-align:center}
+        .df-reply-body{flex:1;display:flex;flex-direction:column;gap:8px;min-width:0}
+        .df-reply-head{}
+        .df-reply-user{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+        .df-rname{font-size:10px;font-weight:600}
+        .df-rtime{font-size:7px;opacity:0.35;font-family:monospace}
+        .df-edited{font-size:7px;opacity:0.35;font-style:italic}
+        .df-reply-content{font-size:10px;line-height:1.65}
+        .df-reply-acts{display:flex;gap:6px;flex-wrap:wrap;margin-top:4px}
+        .df-nested{margin-top:6px}
+        .df-add-reply{background:#090909;border:1px solid #1e3a5f;padding:14px;display:flex;flex-direction:column;gap:10px}
+        .df-reply-indicator{display:flex;justify-content:space-between;align-items:center;background:rgba(30,58,95,0.2);border:1px solid #1e3a5f;padding:4px 10px;font-size:8px}
+        .df-cancel-reply{background:none;border:none;color:#fff;font-size:14px;cursor:pointer;opacity:0.5;line-height:1}
+        .df-cancel-reply:hover{opacity:1}
+        .df-reply-textarea{background:#0e0e0e;border:1px solid #1a1a1a;color:#fff;padding:10px;font-size:10px;font-family:inherit;outline:none;transition:border-color 0.15s;resize:vertical;width:100%}
+        .df-reply-textarea:focus{border-color:#1e3a5f}
+        .df-reply-textarea::placeholder{opacity:0.25}
+        .df-code-editor-wrap{display:flex;flex-direction:column}
+        .df-code-textarea{background:#070707;border:1px solid #111;color:#fff;padding:10px;font-size:9px;font-family:'SF Mono','Monaco','Fira Code',monospace;outline:none;transition:border-color 0.15s;resize:vertical;width:100%;line-height:1.6}
+        .df-code-textarea:focus{border-color:#1e3a5f}
+        .df-code-textarea::placeholder{opacity:0.25}
+        .df-reply-toolbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+        .df-toolbar-btn{background:none;border:1px solid #1a1a1a;color:#fff;padding:4px 10px;font-size:8px;cursor:pointer;font-family:inherit;letter-spacing:0.5px;transition:all 0.15s}
+        .df-toolbar-btn:hover{border-color:#1e3a5f}
+        .df-toolbar-active{background:rgba(30,58,95,0.2);border-color:#1e3a5f}
+        .df-toolbar-right{margin-left:auto;display:flex;align-items:center;gap:8px}
+        .df-char-cnt{font-size:8px;opacity:0.3}
+        .df-submit-btn{background:#1e3a5f;border:none;color:#fff;padding:7px 20px;font-size:9px;cursor:pointer;font-family:inherit;letter-spacing:1px;transition:background 0.2s}
+        .df-submit-btn:hover:not(:disabled){background:#2a4a7a}
+        .df-submit-btn:disabled{opacity:0.3;cursor:not-allowed}
+        .df-locked-msg{text-align:center;padding:12px;font-size:8px;opacity:0.4;letter-spacing:1px;border:1px solid #111;background:#070707}
+
+        /* ── CREATE VIEW ── */
+        .df-create-view{display:flex;flex-direction:column;gap:14px}
+        .df-create-layout{display:grid;grid-template-columns:1fr 300px;gap:14px}
+        .df-create-form{background:#090909;border:1px solid #1e3a5f;padding:16px;display:flex;flex-direction:column;gap:10px}
+        .df-create-aside{display:flex;flex-direction:column;gap:10px}
+        .df-field{display:flex;flex-direction:column;gap:4px}
+        .df-field label{font-size:7px;opacity:0.45;letter-spacing:1px;display:flex;justify-content:space-between;align-items:center}
+        .df-toggle-code-btn{background:none;border:1px solid #1a1a1a;color:#fff;font-size:7px;padding:1px 6px;cursor:pointer;font-family:inherit;opacity:0.5;transition:all 0.15s}
+        .df-toggle-code-btn:hover{border-color:#1e3a5f;opacity:1}
+        .df-input{background:#0e0e0e;border:1px solid #1a1a1a;color:#fff;padding:7px 10px;font-size:10px;font-family:inherit;outline:none;transition:border-color 0.15s;width:100%}
+        .df-input:focus{border-color:#1e3a5f}
+        .df-input::placeholder{opacity:0.25}
+        select.df-input{cursor:pointer}
+        .df-textarea{resize:vertical;min-height:60px;line-height:1.6}
+        .df-code-input{font-family:'SF Mono','Monaco','Fira Code',monospace;font-size:9px}
+        .df-draft-tags{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
+        .df-tag-edit{font-size:8px;padding:2px 8px;background:#0e0e0e;border:1px solid #1e3a5f;display:flex;align-items:center;gap:4px}
+        .df-tag-edit button{background:none;border:none;color:#555;cursor:pointer;font-size:11px;line-height:1}
+        .df-tag-edit button:hover{color:#fff}
+        .df-guide-panel,.df-preview-panel{background:#090909;border:1px solid #1e3a5f;padding:12px}
+        .df-guide-list{display:flex;flex-direction:column;gap:6px}
+        .df-guide-item{display:flex;gap:8px;font-size:8px;opacity:0.65;line-height:1.4}
+        .df-guide-num{font-size:7px;color:#1e3a5f;font-weight:700;flex-shrink:0;opacity:1}
+        .df-preview-title{font-size:10px;font-weight:600;margin-bottom:6px}
+        .df-preview-content{font-size:8px;opacity:0.5;line-height:1.5;margin-bottom:8px}
+        .df-preview-meta{display:flex;gap:8px;font-size:7px;opacity:0.35}
+        .df-submit-disc-btn{width:100%;background:#1e3a5f;border:none;color:#fff;padding:10px;font-size:10px;cursor:pointer;font-family:inherit;letter-spacing:1px;transition:background 0.2s}
+        .df-submit-disc-btn:hover:not(:disabled){background:#2a4a7a}
+        .df-submit-disc-btn:disabled{opacity:0.35;cursor:not-allowed}
+        .df-cancel-disc-btn{width:100%;background:none;border:1px solid #1a1a1a;color:#fff;padding:8px;font-size:9px;cursor:pointer;font-family:inherit;letter-spacing:1px;transition:all 0.15s}
+        .df-cancel-disc-btn:hover{border-color:#1e3a5f}
+
+        /* ── MODALS ── */
+        .df-modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.92);display:flex;align-items:center;justify-content:center;z-index:2000}
+        .df-modal-box{background:#0a0a0a;border:1px solid #1e3a5f;padding:20px;width:420px;max-width:94vw;max-height:80vh;overflow-y:auto;position:relative;display:flex;flex-direction:column;gap:10px}
+        .df-modal-box::-webkit-scrollbar{width:4px}
+        .df-modal-box::-webkit-scrollbar-track{background:#111}
+        .df-modal-box::-webkit-scrollbar-thumb{background:#222}
+        .df-modal-title{font-size:12px;letter-spacing:2px;font-weight:700}
+        .df-modal-sub{font-size:8px;opacity:0.35;font-family:monospace}
+        .df-report-options{display:flex;flex-direction:column;gap:6px}
+        .df-report-opt{display:flex;align-items:center;gap:8px;cursor:pointer;font-size:9px;opacity:0.7;padding:4px 0}
+        .df-report-opt:hover{opacity:1}
+        .df-modal-textarea{background:#0e0e0e;border:1px solid #1a1a1a;color:#fff;padding:8px 10px;font-size:9px;font-family:inherit;outline:none;resize:vertical;width:100%}
+        .df-modal-textarea:focus{border-color:#1e3a5f}
+        .df-modal-input{background:#0e0e0e;border:1px solid #1e3a5f;color:#fff;padding:8px 12px;font-size:9px;font-family:monospace;outline:none;width:100%}
+        .df-modal-acts{display:flex;gap:8px;justify-content:flex-end;margin-top:4px}
+        .df-modal-cancel{background:none;border:1px solid #1a1a1a;color:#fff;padding:7px 16px;font-size:9px;cursor:pointer;font-family:inherit;letter-spacing:0.5px;transition:all 0.15s}
+        .df-modal-cancel:hover{border-color:#1e3a5f}
+        .df-modal-submit{background:#1e3a5f;border:none;color:#fff;padding:7px 16px;font-size:9px;cursor:pointer;font-family:inherit;letter-spacing:0.5px;transition:background 0.2s}
+        .df-modal-submit:hover{background:#2a4a7a}
+        .df-modal-close{position:absolute;top:10px;right:14px;background:none;border:none;color:#fff;font-size:18px;cursor:pointer;opacity:0.35;line-height:1}
+        .df-modal-close:hover{opacity:1}
+        .df-share-link{display:flex;gap:8px}
+        .df-share-meta{display:flex;flex-direction:column;gap:4px}
+        .df-sm-row{display:flex;justify-content:space-between;font-size:8px;padding:3px 0;border-bottom:1px dotted #111}
+        .df-sm-row span:first-child{opacity:0.4}
+
+        /* Scan line */
+        .df-scan-line{position:fixed;top:0;left:0;right:0;height:100%;background:linear-gradient(to bottom,transparent 0%,rgba(30,58,95,0.02) 50%,transparent 100%);pointer-events:none;animation:dfscanline 8s linear infinite;z-index:999}
+        @keyframes dfscanline{0%{transform:translateY(-100%)}100%{transform:translateY(100%)}}
 
         /* Responsive */
-        @media (max-width: 768px) {
-          .forum-header {
-            flex-direction: column;
-            gap: 1rem;
-            text-align: center;
-          }
-
-          .filters-bar {
-            flex-direction: column;
-          }
-
-          .filter-controls {
-            flex-wrap: wrap;
-          }
-
-          .discussion-meta {
-            flex-direction: column;
-            gap: 1rem;
-          }
-
-          .reply-thread.depth-1 { margin-left: 1rem; }
-          .reply-thread.depth-2 { margin-left: 2rem; }
-          .reply-thread.depth-3 { margin-left: 3rem; }
-
-          .reply-item {
-            flex-direction: column;
-          }
-
-          .reply-sidebar {
-            flex-direction: row;
-            justify-content: flex-start;
-          }
-
-          .reply-actions {
-            flex-wrap: wrap;
-          }
-
-          .reply-toolbar {
-            flex-wrap: wrap;
-          }
-
-          .toolbar-right {
-            margin-left: 0;
-            width: 100%;
-          }
-
-          .toolbar-right .btn {
-            width: 100%;
-          }
-
-          .pagination {
-            flex-wrap: wrap;
-          }
-        }
+        @media(max-width:1200px){.df-stats-grid{grid-template-columns:repeat(3,1fr)}.df-table-header,.df-table-row{grid-template-columns:2fr 80px 100px 100px 60px 55px 55px 80px}}
+        @media(max-width:1000px){.df-main{flex-direction:column}.df-sidebar{width:100%}.df-create-layout{grid-template-columns:1fr}}
+        @media(max-width:768px){.df-stats-grid{grid-template-columns:repeat(2,1fr)}.depth-1{margin-left:12px}.depth-2{margin-left:24px}.depth-3{margin-left:36px}.df-table-header,.df-table-row{grid-template-columns:2fr 80px 90px 50px 55px}.df-row-tags,.df-row-views{display:none}}
       `}</style>
     </div>
   )
