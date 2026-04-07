@@ -1,0 +1,16 @@
+appId: com.eddesk.app
+productName: ED-DESK
+directories:
+  output: dist
+  buildResources: build
+files:
+  - dist/**/*
+  - node_modules/**/*
+  - resources/**/*
+mac:
+  category: public.app-category.education
+win:
+  target: nsis
+  icon: resources/icon.ico
+linux:
+  target: AppImage
