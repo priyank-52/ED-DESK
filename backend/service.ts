@@ -12,7 +12,10 @@ import type {
   BackendStatus,
   ChatMessageRecord,
   ConversationRecord,
-  PeerRecord
+  DevicePermissions,
+  HostedSessionSummary,
+  PeerRecord,
+  SessionRecord
 } from './types'
 
 interface PeerHeartbeat {
@@ -21,6 +24,7 @@ interface PeerHeartbeat {
   displayName: string
   port: number
   capabilities: string[]
+  hostedSession: HostedSessionSummary | null
   timestamp: number
 }
 
@@ -32,6 +36,13 @@ interface PeerMessagePayload {
   timestamp: number
 }
 
+interface JoinSessionPayload {
+  peerId: string
+  peerName: string
+  code: string
+  password?: string
+}
+
 export class OfflineBackendService {
   private readonly discoveryPort = 41235
   private readonly database: BackendDatabase
@@ -41,9 +52,11 @@ export class OfflineBackendService {
   private discoverySocket: dgram.Socket | null = null
   private serverPort = 0
   private localAddress = '127.0.0.1'
+  private heartbeatTimer: NodeJS.Timeout | null = null
+  private peerExpiryTimer: NodeJS.Timeout | null = null
 
   constructor() {
-    this.database = new BackendDatabase(join(app.getPath('userData'), 'backend', 'eddesk.sqlite'))
+    this.database = new BackendDatabase(join(app.getPath('userData'), 'backend', 'eddesk.json'))
     this.peerId = `peer-${os.hostname().toLowerCase()}`
     this.displayName = os.hostname()
   }
@@ -52,12 +65,14 @@ export class OfflineBackendService {
     await this.database.init()
     await this.startHttpServer()
     await this.startDiscovery()
-    this.scanPeers()
-    setInterval(() => this.broadcastHeartbeat(), 8000)
-    setInterval(() => this.expirePeers(), 12000)
+    this.broadcastHeartbeat()
+    this.heartbeatTimer = setInterval(() => this.broadcastHeartbeat(), 8000)
+    this.peerExpiryTimer = setInterval(() => this.expirePeers(), 12000)
   }
 
   async stop(): Promise<void> {
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer)
+    if (this.peerExpiryTimer) clearInterval(this.peerExpiryTimer)
     this.discoverySocket?.close()
     this.discoverySocket = null
 
@@ -78,35 +93,48 @@ export class OfflineBackendService {
 
   private async startHttpServer(): Promise<void> {
     this.server = http.createServer(async (request, response) => {
-      const url = new URL(request.url ?? '/', 'http://127.0.0.1')
+      try {
+        const url = new URL(request.url ?? '/', 'http://127.0.0.1')
 
-      if (request.method === 'GET' && url.pathname === '/api/status') {
-        this.writeJson(response, 200, this.getStatus())
-        return
+        if (request.method === 'GET' && url.pathname === '/api/status') {
+          this.writeJson(response, 200, this.getStatus())
+          return
+        }
+
+        if (request.method === 'POST' && url.pathname === '/api/peer/message') {
+          const payload = await this.readJson<PeerMessagePayload>(request)
+          const message = this.receivePeerMessage(payload)
+          this.writeJson(response, 200, { ok: true, message })
+          return
+        }
+
+        if (request.method === 'POST' && url.pathname === '/api/peer/session/join') {
+          const payload = await this.readJson<JoinSessionPayload>(request)
+          const session = this.acceptSessionJoin(payload)
+          this.writeJson(response, 200, { ok: true, session })
+          return
+        }
+
+        if (request.method === 'POST' && url.pathname === '/api/peer/assessment') {
+          const payload = await this.readJson<{ assessment: AssessmentRecord }>(request)
+          this.receivePeerAssessment(payload.assessment)
+          this.writeJson(response, 200, { ok: true })
+          return
+        }
+
+        if (request.method === 'POST' && url.pathname === '/api/peer/assessment-submission') {
+          const payload = await this.readJson<{ submission: AssessmentSubmissionRecord }>(request)
+          this.receiveSubmission(payload.submission)
+          this.writeJson(response, 200, { ok: true })
+          return
+        }
+
+        this.writeJson(response, 404, { error: 'Not found' })
+      } catch (error) {
+        this.writeJson(response, 400, {
+          error: error instanceof Error ? error.message : 'Request failed'
+        })
       }
-
-      if (request.method === 'POST' && url.pathname === '/api/peer/message') {
-        const payload = await this.readJson<PeerMessagePayload>(request)
-        const message = this.receivePeerMessage(payload)
-        this.writeJson(response, 200, { ok: true, message })
-        return
-      }
-
-      if (request.method === 'POST' && url.pathname === '/api/peer/assessment') {
-        const payload = await this.readJson<{ assessment: AssessmentRecord }>(request)
-        this.receivePeerAssessment(payload.assessment)
-        this.writeJson(response, 200, { ok: true })
-        return
-      }
-
-      if (request.method === 'POST' && url.pathname === '/api/peer/assessment-submission') {
-        const payload = await this.readJson<{ submission: AssessmentSubmissionRecord }>(request)
-        this.receiveSubmission(payload.submission)
-        this.writeJson(response, 200, { ok: true })
-        return
-      }
-
-      this.writeJson(response, 404, { error: 'Not found' })
     })
 
     await new Promise<void>((resolve, reject) => {
@@ -143,7 +171,8 @@ export class OfflineBackendService {
           status: 'online',
           transport: 'wifi',
           capabilities: payload.capabilities,
-          lastSeen: Date.now()
+          lastSeen: Date.now(),
+          hostedSession: payload.hostedSession
         })
       } catch {
         // Ignore invalid datagrams.
@@ -178,6 +207,20 @@ export class OfflineBackendService {
     }
   }
 
+  private currentHostedSessionSummary(): HostedSessionSummary | null {
+    const hosted = this.database.getHostedSession()
+    if (!hosted) return null
+    return {
+      code: hosted.code,
+      name: hosted.name,
+      description: hosted.description,
+      visibility: hosted.visibility,
+      passwordRequired: Boolean(hosted.password),
+      participantCount: hosted.participantPeerIds.length + 1,
+      updatedAt: hosted.updatedAt
+    }
+  }
+
   private broadcastHeartbeat(): void {
     const payload: PeerHeartbeat = {
       app: 'ed-desk',
@@ -185,6 +228,7 @@ export class OfflineBackendService {
       displayName: this.displayName,
       port: this.serverPort,
       capabilities: ['chat', 'assessment', 'ledger'],
+      hostedSession: this.currentHostedSessionSummary(),
       timestamp: Date.now()
     }
 
@@ -224,7 +268,13 @@ export class OfflineBackendService {
           for await (const chunk of response) {
             chunks.push(Buffer.from(chunk))
           }
-          resolve(JSON.parse(Buffer.concat(chunks).toString()) as T)
+          const raw = Buffer.concat(chunks).toString()
+          if (response.statusCode && response.statusCode >= 400) {
+            const error = raw ? JSON.parse(raw) as { error?: string } : {}
+            reject(new Error(error.error ?? `Request failed with status ${response.statusCode}`))
+            return
+          }
+          resolve(JSON.parse(raw) as T)
         }
       )
 
@@ -261,7 +311,8 @@ export class OfflineBackendService {
       peersOnline: this.listPeers().filter((peer) => peer.status === 'online').length,
       conversations: this.listConversations().length,
       assessments: this.listAssessments().length,
-      recordsInLedger: this.listLedger().length
+      recordsInLedger: this.listLedger().length,
+      activeHostedSession: this.currentHostedSessionSummary()
     }
   }
 
@@ -272,13 +323,167 @@ export class OfflineBackendService {
     }
   }
 
+  getPermissions(): DevicePermissions {
+    return this.database.getPermissions()
+  }
+
+  updatePermissions(partial: Partial<DevicePermissions>): DevicePermissions {
+    return this.database.updatePermissions(partial)
+  }
+
   listPeers(): PeerRecord[] {
     return this.database.listPeers()
   }
 
   scanPeers(): PeerRecord[] {
+    if (this.getPermissions().nearbyScan !== 'granted') {
+      throw new Error('Nearby device permission is not granted.')
+    }
     this.broadcastHeartbeat()
     return this.listPeers()
+  }
+
+  listAvailableSessions(): Array<SessionRecord & { address: string; peerStatus: PeerRecord['status'] }> {
+    return this.listPeers()
+      .filter((peer) => peer.hostedSession)
+      .map((peer) => ({
+        id: `remote-${peer.id}`,
+        code: peer.hostedSession!.code,
+        name: peer.hostedSession!.name,
+        description: peer.hostedSession!.description,
+        hostPeerId: peer.id,
+        hostDisplayName: peer.displayName,
+        visibility: peer.hostedSession!.visibility,
+        password: null,
+        participantPeerIds: [],
+        createdAt: peer.hostedSession!.updatedAt,
+        updatedAt: peer.hostedSession!.updatedAt,
+        status: peer.status === 'online' ? 'active' : 'waiting',
+        address: peer.address,
+        peerStatus: peer.status
+      }))
+  }
+
+  getHostedSession(): SessionRecord | null {
+    return this.database.getHostedSession()
+  }
+
+  createHostedSession(input: {
+    code?: string
+    name: string
+    description: string
+    visibility: 'public' | 'private'
+    password?: string
+  }): SessionRecord {
+    const normalizedCode = (input.code?.trim().toUpperCase() || this.generateSessionCode())
+    const password = input.visibility === 'private' ? input.password?.trim() || null : null
+    const now = Date.now()
+    const session: SessionRecord = {
+      id: `session-${this.peerId}`,
+      code: normalizedCode,
+      name: input.name.trim() || `${this.displayName} Session`,
+      description: input.description.trim() || 'LAN session ready for chat',
+      hostPeerId: this.peerId,
+      hostDisplayName: this.displayName,
+      visibility: input.visibility,
+      password,
+      participantPeerIds: [],
+      createdAt: now,
+      updatedAt: now,
+      status: 'waiting'
+    }
+    this.database.saveHostedSession(session)
+    this.database.addLedgerRecord({
+      entityType: 'message',
+      entityId: session.id,
+      action: 'session-create',
+      payload: {
+        code: session.code,
+        visibility: session.visibility
+      }
+    })
+    this.broadcastHeartbeat()
+    return session
+  }
+
+  closeHostedSession(): void {
+    const hosted = this.database.getHostedSession()
+    if (hosted) {
+      this.database.addLedgerRecord({
+        entityType: 'message',
+        entityId: hosted.id,
+        action: 'session-close',
+        payload: {
+          code: hosted.code
+        }
+      })
+    }
+    this.database.saveHostedSession(null)
+    this.broadcastHeartbeat()
+  }
+
+  async joinSessionByCode(code: string, password?: string): Promise<SessionRecord> {
+    const normalizedCode = code.trim().toUpperCase()
+    const directMatch = this.listPeers().find((peer) => peer.hostedSession?.code === normalizedCode)
+    const peer = directMatch ?? (() => {
+      this.broadcastHeartbeat()
+      return this.listPeers().find((candidate) => candidate.hostedSession?.code === normalizedCode)
+    })()
+
+    if (!peer || !peer.hostedSession) {
+      throw new Error(`Session code ${normalizedCode} was not found on this network.`)
+    }
+
+    const response = await this.postJson<{ ok: true; session: SessionRecord }>(peer, '/api/peer/session/join', {
+      peerId: this.peerId,
+      peerName: this.displayName,
+      code: normalizedCode,
+      password
+    } satisfies JoinSessionPayload)
+
+    this.database.ensureConversation(peer.id, peer.displayName)
+    this.database.addLedgerRecord({
+      entityType: 'message',
+      entityId: response.session.id,
+      action: 'session-join',
+      payload: {
+        code: normalizedCode,
+        hostPeerId: peer.id
+      }
+    })
+    return response.session
+  }
+
+  private acceptSessionJoin(payload: JoinSessionPayload): SessionRecord {
+    const hosted = this.database.getHostedSession()
+    if (!hosted || hosted.code !== payload.code.trim().toUpperCase()) {
+      throw new Error('Requested session is no longer available.')
+    }
+    if (hosted.visibility === 'private' && hosted.password !== (payload.password?.trim() || null)) {
+      throw new Error('Incorrect session password.')
+    }
+
+    const participantIds = hosted.participantPeerIds.includes(payload.peerId)
+      ? hosted.participantPeerIds
+      : [...hosted.participantPeerIds, payload.peerId]
+    const updated: SessionRecord = {
+      ...hosted,
+      participantPeerIds: participantIds,
+      updatedAt: Date.now(),
+      status: 'active'
+    }
+    this.database.saveHostedSession(updated)
+    this.database.addLedgerRecord({
+      entityType: 'message',
+      entityId: updated.id,
+      action: 'session-accept',
+      payload: {
+        participantPeerId: payload.peerId,
+        code: updated.code
+      }
+    })
+    this.broadcastHeartbeat()
+    return updated
   }
 
   listConversations(): ConversationRecord[] {
@@ -353,7 +558,8 @@ export class OfflineBackendService {
       status: 'online' as const,
       transport: 'wifi' as const,
       capabilities: ['chat'],
-      lastSeen: Date.now()
+      lastSeen: Date.now(),
+      hostedSession: null
     }
 
     const conversation = this.database.ensureConversation(peer.id, payload.peerName)
@@ -518,6 +724,10 @@ export class OfflineBackendService {
 
   listLedger() {
     return this.database.listLedger()
+  }
+
+  private generateSessionCode(): string {
+    return Math.random().toString(36).slice(2, 8).toUpperCase()
   }
 
   private calculateScore(questions: AssessmentQuestion[], answers: Record<string, string>): number {

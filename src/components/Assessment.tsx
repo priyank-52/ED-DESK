@@ -1,5 +1,4 @@
-﻿import React, { useState, useEffect, useRef } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useEffect, useState } from 'react'
 
 // ==================== TYPES ====================
 
@@ -51,23 +50,21 @@ interface SessionStats {
 // ==================== COMPONENT ====================
 
 export default function Assessment() {
-  const navigate = useNavigate()
-
-  // ── View State ──
+  // -- View State --
   const [view, setView] = useState<'list' | 'create' | 'join' | 'preview'>('list')
   const [step, setStep] = useState(1)
   const [time, setTime] = useState(new Date())
   const [selectedAssessment, setSelectedAssessment] = useState<Assessment | null>(null)
   const [logs, setLogs] = useState<string[]>([])
 
-  // ── List / Join ──
+  // -- List / Join --
   const [joinCode, setJoinCode] = useState('')
   const [joinPassword, setJoinPassword] = useState('')
   const [filterStatus, setFilterStatus] = useState<'all' | 'active' | 'scheduled' | 'ended'>('all')
   const [filterDiff, setFilterDiff] = useState<'all' | 'easy' | 'medium' | 'hard'>('all')
   const [searchQuery, setSearchQuery] = useState('')
 
-  // ── Create ──
+  // -- Create --
   const [draftTitle, setDraftTitle] = useState('')
   const [draftDesc, setDraftDesc] = useState('')
   const [draftTimeLimit, setDraftTimeLimit] = useState(60)
@@ -89,7 +86,7 @@ export default function Assessment() {
   const [generatedCode, setGeneratedCode] = useState('')
   const [generatedPass, setGeneratedPass] = useState('')
 
-  // ── Simulated Data ──
+  // -- Simulated Data --
   const [assessments, setAssessments] = useState<Assessment[]>([
     {
       id: 'a1', title: 'Data Structures Mid-term', description: 'Covers arrays, linked lists, stacks, queues and trees.',
@@ -99,7 +96,7 @@ export default function Assessment() {
       category: 'Data Structures', difficulty: 'hard', attempts: 18, avgScore: 74
     },
     {
-      id: 'a2', title: 'Algorithms Quiz — Sorting', description: 'Bubble, merge, quick, heap sort algorithms.',
+      id: 'a2', title: 'Algorithms Quiz � Sorting', description: 'Bubble, merge, quick, heap sort algorithms.',
       creator: 'Dr. Verma', participants: 15, maxParticipants: 30, isLocked: false,
       code: 'ALGO55', timeLimit: 30, questions: 15, totalPoints: 150, status: 'active',
       startTime: new Date(Date.now() - 300000), endTime: new Date(Date.now() + 1500000),
@@ -133,7 +130,7 @@ export default function Assessment() {
     avgScore: 77, participants: 96, pendingReview: 12
   })
 
-  // ── Effects ──
+  // -- Effects --
 
   useEffect(() => {
     const t = setInterval(() => setTime(new Date()), 1000)
@@ -157,7 +154,7 @@ export default function Assessment() {
     return () => clearInterval(interval)
   }, [])
 
-  // ── Utilities ──
+  // -- Utilities --
 
   function blankQuestion(): Question {
     return {
@@ -204,12 +201,12 @@ export default function Assessment() {
     return true
   })
 
-  // ── Actions ──
+  // -- Actions --
 
   const handleJoin = () => {
     if (!joinCode.trim()) return
     const found = assessments.find(a => a.code === joinCode)
-    if (found?.isLocked && !joinPassword.trim()) { addLog(`JOIN FAILED — ${joinCode} requires password`); return }
+    if (found?.isLocked && !joinPassword.trim()) { addLog(`JOIN FAILED � ${joinCode} requires password`); return }
     addLog(`JOINED session ${joinCode}`)
     alert(`Joined: ${found?.title || joinCode}`)
   }
@@ -219,7 +216,7 @@ export default function Assessment() {
     const pass = Math.floor(1000 + Math.random() * 9000).toString()
     setGeneratedCode(code)
     setGeneratedPass(pass)
-    addLog(`CREATED assessment "${draftTitle}" • ${code}`)
+    addLog(`CREATED assessment "${draftTitle}" � ${code}`)
     const newA: Assessment = {
       id: `a-${Date.now()}`, title: draftTitle, description: draftDesc,
       creator: 'You', participants: 0, maxParticipants: draftMaxParticipants,
@@ -236,7 +233,7 @@ export default function Assessment() {
     if (!editingQuestion.text.trim()) return
     setQuestions(prev => [...prev, { ...editingQuestion, id: Math.random().toString(36).substr(2, 9) }])
     setEditingQuestion(blankQuestion())
-    addLog(`Q${questions.length + 1} added — ${editingQuestion.type}`)
+    addLog(`Q${questions.length + 1} added � ${editingQuestion.type}`)
   }
 
   const removeQuestion = (id: string) => {
@@ -248,7 +245,7 @@ export default function Assessment() {
   return (
     <div className="aroot">
 
-      {/* ── PAGE HEADER (matches Home ascii-header) ── */}
+      {/* -- PAGE HEADER (matches Home ascii-header) -- */}
       <div className="a-page-header">
         <div className="a-page-title">
           <span className="a-title-text">ASSESSMENT MODULE</span>
@@ -263,7 +260,7 @@ export default function Assessment() {
         </div>
       </div>
 
-      {/* ── STATS DASHBOARD (matches home monitor-card grid) ── */}
+      {/* -- STATS DASHBOARD (matches home monitor-card grid) -- */}
       <div className="a-stats-grid">
         <div className="a-stat-card">
           <div className="asc-header"><span>TOTAL</span><span className="asc-val">{stats.totalAssessments}</span></div>
@@ -297,10 +294,10 @@ export default function Assessment() {
         </div>
       </div>
 
-      {/* ── MAIN PANEL ── */}
+      {/* -- MAIN PANEL -- */}
       <div className="a-main">
 
-        {/* ── SIDEBAR ── */}
+        {/* -- SIDEBAR -- */}
         <aside className="a-sidebar">
           <div className="a-sb-section">
             <div className="a-sb-title">NAVIGATION</div>
@@ -314,7 +311,7 @@ export default function Assessment() {
                 className={`a-sb-btn ${view === item.key ? 'a-sb-active' : ''}`}
                 onClick={() => { setView(item.key as any); setStep(1) }}
               >
-                <span className="a-sb-arrow">{view === item.key ? '▸' : '·'}</span>
+                <span className="a-sb-arrow">{view === item.key ? '?' : '�'}</span>
                 {item.label}
               </button>
             ))}
@@ -353,10 +350,10 @@ export default function Assessment() {
           </div>
         </aside>
 
-        {/* ── CONTENT AREA ── */}
+        {/* -- CONTENT AREA -- */}
         <div className="a-content">
 
-          {/* ════════════════ LIST VIEW ════════════════ */}
+          {/* ---------------- LIST VIEW ---------------- */}
           {view === 'list' && (
             <div className="a-list-view">
               {/* Toolbar */}
@@ -412,7 +409,7 @@ export default function Assessment() {
                       <span className="a-row-name">{a.title}</span>
                       <span className="a-row-cat">{a.category}</span>
                     </div>
-                    <span className="a-row-code">{a.code}{a.isLocked ? ' ⬡' : ''}</span>
+                    <span className="a-row-code">{a.code}{a.isLocked ? ' ?' : ''}</span>
                     <span className="a-row-creator">{a.creator}</span>
                     <span className={`a-diff ${diffColor(a.difficulty)}`}>{a.difficulty.toUpperCase()}</span>
                     <span className={`a-status ${statusColor(a.status)}`}>{a.status.toUpperCase()}</span>
@@ -448,7 +445,7 @@ export default function Assessment() {
             </div>
           )}
 
-          {/* ════════════════ JOIN VIEW ════════════════ */}
+          {/* ---------------- JOIN VIEW ---------------- */}
           {view === 'join' && (
             <div className="a-join-view">
               <div className="a-view-title">JOIN SESSION</div>
@@ -465,7 +462,7 @@ export default function Assessment() {
                     <div className="ajc-top">
                       <div>
                         <div className="ajc-title">{a.title}</div>
-                        <div className="ajc-code">{a.code}{a.isLocked ? ' — PRIVATE' : ' — PUBLIC'}</div>
+                        <div className="ajc-code">{a.code}{a.isLocked ? ' � PRIVATE' : ' � PUBLIC'}</div>
                       </div>
                       <span className={`a-status ${statusColor(a.status)}`}>{a.status.toUpperCase()}</span>
                     </div>
@@ -506,7 +503,7 @@ export default function Assessment() {
                     <input
                       type="password"
                       className="a-code-input a-pass-input"
-                      placeholder="••••"
+                      placeholder="����"
                       value={joinPassword}
                       onChange={e => setJoinPassword(e.target.value)}
                     />
@@ -524,7 +521,7 @@ export default function Assessment() {
             </div>
           )}
 
-          {/* ════════════════ PREVIEW VIEW ════════════════ */}
+          {/* ---------------- PREVIEW VIEW ---------------- */}
           {view === 'preview' && selectedAssessment && (
             <div className="a-preview-view">
               <div className="a-preview-header">
@@ -619,7 +616,7 @@ export default function Assessment() {
             </div>
           )}
 
-          {/* ════════════════ CREATE VIEW ════════════════ */}
+          {/* ---------------- CREATE VIEW ---------------- */}
           {view === 'create' && (
             <div className="a-create-view">
               <div className="a-view-title">CREATE ASSESSMENT</div>
@@ -641,7 +638,7 @@ export default function Assessment() {
                 ))}
               </div>
 
-              {/* ── STEP 1: Basic Info ── */}
+              {/* -- STEP 1: Basic Info -- */}
               {step === 1 && (
                 <div className="a-step-body">
                   <div className="a-form-grid">
@@ -685,7 +682,7 @@ export default function Assessment() {
                 </div>
               )}
 
-              {/* ── STEP 2: Questions ── */}
+              {/* -- STEP 2: Questions -- */}
               {step === 2 && (
                 <div className="a-step-body a-questions-layout">
                   {/* Question List */}
@@ -703,7 +700,7 @@ export default function Assessment() {
                             <span className={diffColor(q.difficulty || 'medium')}>{(q.difficulty || 'medium').toUpperCase()}</span>
                           </div>
                         </div>
-                        <button className="a-ql-remove" onClick={() => removeQuestion(q.id)}>×</button>
+                        <button className="a-ql-remove" onClick={() => removeQuestion(q.id)}>�</button>
                       </div>
                     ))}
                     {questions.length > 0 && (
@@ -749,7 +746,7 @@ export default function Assessment() {
                     {/* MCQ Options */}
                     {editingQuestion.type === 'mcq' && (
                       <div className="a-qbuilder">
-                        <div className="a-qb-title">OPTIONS — SELECT CORRECT ANSWER</div>
+                        <div className="a-qb-title">OPTIONS � SELECT CORRECT ANSWER</div>
                         {(editingQuestion.options || ['', '', '', '']).map((opt, idx) => (
                           <div key={idx} className="a-opt-row">
                             <input
@@ -845,7 +842,7 @@ export default function Assessment() {
                                 setEditingQuestion({ ...editingQuestion, testCases: tcs })
                               }} />
                             </div>
-                            <button className="a-tc-rm" onClick={() => setEditingQuestion({ ...editingQuestion, testCases: editingQuestion.testCases?.filter((_, i) => i !== idx) })}>×</button>
+                            <button className="a-tc-rm" onClick={() => setEditingQuestion({ ...editingQuestion, testCases: editingQuestion.testCases?.filter((_, i) => i !== idx) })}>�</button>
                           </div>
                         ))}
                         <button className="a-add-tc" onClick={() => setEditingQuestion({ ...editingQuestion, testCases: [...(editingQuestion.testCases || []), { input: '', expectedOutput: '', weight: 1 }] })}>
@@ -867,7 +864,7 @@ export default function Assessment() {
                 </div>
               )}
 
-              {/* ── STEP 3: Settings ── */}
+              {/* -- STEP 3: Settings -- */}
               {step === 3 && (
                 <div className="a-step-body">
                   <div className="a-settings-grid">
@@ -919,7 +916,7 @@ export default function Assessment() {
                 </div>
               )}
 
-              {/* ── STEP 4: Review ── */}
+              {/* -- STEP 4: Review -- */}
               {step === 4 && (
                 <div className="a-step-body">
                   <div className="a-review-grid">
@@ -950,7 +947,7 @@ export default function Assessment() {
                         ['ALLOW RETAKES', draftAllowRetake ? `YES (${draftMaxAttempts}x)` : 'NO'],
                         ['PROCTORING', draftProctoring ? 'ENABLED' : 'DISABLED'],
                         ['NEGATIVE MARKING', draftNegativeMarking ? 'ENABLED' : 'DISABLED'],
-                        ['LOCKED', draftLocked ? 'YES — PASSWORD PROTECTED' : 'NO — OPEN'],
+                        ['LOCKED', draftLocked ? 'YES � PASSWORD PROTECTED' : 'NO � OPEN'],
                         ['LATE CUTOFF', draftCutoffTime ? 'YES' : 'NO'],
                         ['SHOW RESULTS', draftShowResults.toUpperCase()],
                       ].map(([k, v]) => (
@@ -988,7 +985,7 @@ export default function Assessment() {
                 </div>
               )}
 
-              {/* ── STEP 5: Published ── */}
+              {/* -- STEP 5: Published -- */}
               {step === 5 && (
                 <div className="a-step-body a-published">
                   <div className="a-pub-title">ASSESSMENT PUBLISHED</div>
@@ -1045,16 +1042,16 @@ export default function Assessment() {
         </div>
       </div>
 
-      {/* ── SCAN LINE EFFECT (matching Home) ── */}
+      {/* -- SCAN LINE EFFECT (matching Home) -- */}
       <div className="a-scan-line" />
 
-      {/* ══════════════════════════════════════════════════════════════
-          STYLES — matching Home page terminal aesthetic exactly
-      ══════════════════════════════════════════════════════════════ */}
+      {/* --------------------------------------------------------------
+          STYLES � matching Home page terminal aesthetic exactly
+      -------------------------------------------------------------- */}
       <style>{`
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
-        /* ── ROOT ── */
+        /* -- ROOT -- */
         .aroot {
           min-height: calc(100vh - 56px);
           background: #030303;
@@ -1069,14 +1066,14 @@ export default function Assessment() {
           overflow-y: auto;
         }
 
-        /* Scrollbar — identical to Home */
+        /* Scrollbar � identical to Home */
         .aroot::-webkit-scrollbar { width: 4px; }
         .aroot::-webkit-scrollbar-track { background: #111; }
         .aroot::-webkit-scrollbar-thumb { background: #222; }
         .aroot::-webkit-scrollbar-thumb:hover { background: #1e3a5f; }
         * { scrollbar-width: thin; scrollbar-color: #222 #111; }
 
-        /* ── PAGE HEADER — matches ascii-header from Home ── */
+        /* -- PAGE HEADER � matches ascii-header from Home -- */
         .a-page-header {
           background: #0a0a0a;
           border: 1px solid #1e3a5f;
@@ -1129,7 +1126,7 @@ export default function Assessment() {
         .a-log-line { color: #ffffff; font-size: 9px; opacity: 0.7; animation: fadeIn 0.3s ease; }
         @keyframes fadeIn { from{opacity:0;transform:translateX(8px)} to{opacity:1;transform:translateX(0)} }
 
-        /* ── STATS GRID — matches dashboard from Home ── */
+        /* -- STATS GRID � matches dashboard from Home -- */
         .a-stats-grid {
           display: grid;
           grid-template-columns: repeat(6, 1fr);
@@ -1163,7 +1160,7 @@ export default function Assessment() {
         .asc-bar { height: 2px; background: #1a1a1a; overflow: hidden; }
         .asc-fill { height: 100%; background: #1e3a5f; transition: width 0.5s; }
 
-        /* ── MAIN LAYOUT ── */
+        /* -- MAIN LAYOUT -- */
         .a-main {
           display: flex;
           flex: 1;
@@ -1173,7 +1170,7 @@ export default function Assessment() {
           min-height: 0;
         }
 
-        /* ── SIDEBAR ── */
+        /* -- SIDEBAR -- */
         .a-sidebar {
           width: 260px;
           min-width: 260px;
@@ -1237,7 +1234,7 @@ export default function Assessment() {
         .a-sb-log { font-size: 8px; opacity: 0.5; padding: 2px 0; border-bottom: 1px dotted #0d0d0d; font-family: monospace; }
         .a-sb-log-empty { font-size: 8px; opacity: 0.2; font-style: italic; }
 
-        /* ── CONTENT ── */
+        /* -- CONTENT -- */
         .a-content {
           flex: 1;
           background: #0a0a0a;
@@ -1259,7 +1256,7 @@ export default function Assessment() {
           padding-left: 10px;
         }
 
-        /* ── TOOLBAR ── */
+        /* -- TOOLBAR -- */
         .a-toolbar {
           display: flex;
           justify-content: space-between;
@@ -1298,7 +1295,7 @@ export default function Assessment() {
         .a-filter-btn:hover { opacity: 0.75; }
         .a-filter-btn.a-filter-active { opacity: 1; border-color: #1e3a5f; background: rgba(30,58,95,0.18); }
 
-        /* ── TABLE ── */
+        /* -- TABLE -- */
         .a-table-header {
           display: grid;
           grid-template-columns: 2fr 80px 100px 60px 80px 90px 50px 90px 60px 100px;
@@ -1368,7 +1365,7 @@ export default function Assessment() {
           letter-spacing: 0.5px;
         }
 
-        /* ── JOIN VIEW ── */
+        /* -- JOIN VIEW -- */
         .a-join-view { display: flex; flex-direction: column; gap: 16px; }
         .a-join-section-title { font-size: 8px; letter-spacing: 1.5px; opacity: 0.35; margin-bottom: 8px; }
         .a-join-grid {
@@ -1426,7 +1423,7 @@ export default function Assessment() {
         .a-info-row { display: flex; justify-content: space-between; font-size: 8px; padding: 4px 0; border-bottom: 1px dotted #111; }
         .a-info-row span:first-child { opacity: 0.4; }
 
-        /* ── PREVIEW VIEW ── */
+        /* -- PREVIEW VIEW -- */
         .a-preview-view { display: flex; flex-direction: column; gap: 16px; }
         .a-preview-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 4px; }
         .a-preview-sub { font-size: 9px; opacity: 0.45; margin-top: 4px; }
@@ -1465,7 +1462,7 @@ export default function Assessment() {
         .a-pact-btn.secondary { background: none; border: 1px solid #1a1a1a; color: #fff; }
         .a-pact-btn.secondary:hover { border-color: #1e3a5f; background: rgba(30,58,95,0.1); }
 
-        /* ── CREATE VIEW ── */
+        /* -- CREATE VIEW -- */
         .a-create-view { display: flex; flex-direction: column; gap: 16px; }
 
         .a-steps {
@@ -1654,7 +1651,7 @@ export default function Assessment() {
         .a-nav-btn:disabled { opacity: 0.3; cursor: not-allowed; }
         .a-step-indicator { font-size: 8px; opacity: 0.35; letter-spacing: 1px; }
 
-        /* Scan line — identical to Home */
+        /* Scan line � identical to Home */
         .a-scan-line {
           position: fixed; top: 0; left: 0; right: 0; height: 100%;
           background: linear-gradient(to bottom, transparent 0%, rgba(30,58,95,0.02) 50%, transparent 100%);
@@ -1691,3 +1688,4 @@ export default function Assessment() {
     </div>
   )
 }
+

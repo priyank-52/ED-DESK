@@ -1,4 +1,5 @@
 import { app, BrowserWindow, ipcMain, shell, powerMonitor, screen } from 'electron'
+import { execFile } from 'node:child_process'
 import { join } from 'path'
 import { fileURLToPath } from 'url'
 import os from 'os'
@@ -10,16 +11,84 @@ const __dirname = fileURLToPath(new URL('.', import.meta.url))
 let mainWindow: BrowserWindow | null = null
 let backendService: OfflineBackendService | null = null
 let cpuUsageHistory: number[] = []
-let lastCpuTimes = process.cpuUsage()
-let lastCpuTime = Date.now()
+let lastCpuSnapshot = os.cpus().map((cpu) => ({ ...cpu.times }))
+let previousProcessSnapshot = new Map<number, { cpuSeconds: number; sampledAt: number }>()
 
-// Network speed tracking
-let lastNetTime = Date.now()
-let lastNetStats = { rx: 0, tx: 0 }
-
-// Battery tracking
-let lastBatteryCheck = Date.now()
 let batteryHistory: number[] = []
+let windowsInfoCache: WindowsInfoRow | null = null
+
+interface PowerShellProcessRow {
+  Id: number
+  ProcessName: string
+  CPU: number | null
+  WorkingSet64: number
+  PriorityClass: number | string | null
+  Threads: number
+}
+
+interface BatteryReading {
+  EstimatedChargeRemaining?: number
+  BatteryStatus?: number
+  EstimatedRunTime?: number
+  Name?: string
+}
+
+interface CounterSampleRow {
+  Path?: string
+  CookedValue?: number
+}
+
+interface NetworkSnapshot {
+  rx: number
+  tx: number
+}
+
+interface WindowsInfoRow {
+  WindowsProductName?: string
+  OsVersion?: string
+}
+
+async function runPowerShellJson<T>(command: string): Promise<T | null> {
+  try {
+    const output = await new Promise<string>((resolve, reject) => {
+      execFile(
+        'powershell.exe',
+        ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', command],
+        {
+          encoding: 'utf8',
+          windowsHide: true,
+          timeout: 5000
+        },
+        (error, stdout) => {
+          if (error) {
+            reject(error)
+            return
+          }
+          resolve(stdout)
+        }
+      )
+    })
+
+    const trimmed = output.trim()
+    if (!trimmed || trimmed === 'null') {
+      return null
+    }
+
+    return JSON.parse(trimmed) as T
+  } catch {
+    return null
+  }
+}
+
+async function getWindowsInfo(): Promise<WindowsInfoRow> {
+  if (windowsInfoCache) return windowsInfoCache
+
+  windowsInfoCache = await runPowerShellJson<WindowsInfoRow>(
+    "Get-ComputerInfo | Select-Object WindowsProductName,OsVersion | ConvertTo-Json -Compress"
+  ) ?? {}
+
+  return windowsInfoCache
+}
 
 function createWindow() {
   const { width, height } = screen.getPrimaryDisplay().workAreaSize
@@ -35,8 +104,7 @@ function createWindow() {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      webSecurity: true,
-      enableBluetoothFeatures: true,
+      webSecurity: true
     },
     icon: join(__dirname, '../../resources/icon.png')
   })
@@ -52,6 +120,20 @@ function createWindow() {
     mainWindow?.show()
   })
 
+  mainWindow.webContents.on('did-finish-load', () => {
+    mainWindow?.show()
+  })
+
+  mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription) => {
+    console.error('Renderer failed to load:', errorCode, errorDescription)
+    mainWindow?.show()
+  })
+
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    console.error('Renderer process exited:', details)
+    mainWindow?.show()
+  })
+
   mainWindow.on('closed', () => {
     mainWindow = null
   })
@@ -64,19 +146,24 @@ function createWindow() {
 
 // Calculate real CPU usage
 function getRealCPUUsage(): number {
-  const currentTimes = process.cpuUsage()
-  const currentTime = Date.now()
-  
-  const userDiff = currentTimes.user - lastCpuTimes.user
-  const systemDiff = currentTimes.system - lastCpuTimes.system
-  const timeDiff = currentTime - lastCpuTime
-  
-  const totalCPU = (userDiff + systemDiff) / (timeDiff * 1000) * 100
-  
-  lastCpuTimes = currentTimes
-  lastCpuTime = currentTime
-  
-  const usage = Math.min(Math.round(totalCPU * 10) / 10, 100)
+  const currentSnapshot = os.cpus().map((cpu) => ({ ...cpu.times }))
+
+  let idleDiff = 0
+  let totalDiff = 0
+
+  currentSnapshot.forEach((times, index) => {
+    const previous = lastCpuSnapshot[index]
+    const currentTotal = times.user + times.nice + times.sys + times.idle + times.irq
+    const previousTotal = previous.user + previous.nice + previous.sys + previous.idle + previous.irq
+    idleDiff += times.idle - previous.idle
+    totalDiff += currentTotal - previousTotal
+  })
+
+  lastCpuSnapshot = currentSnapshot
+
+  const usage = totalDiff > 0
+    ? Math.min(Math.max(Math.round((1 - idleDiff / totalDiff) * 1000) / 10, 0), 100)
+    : 0
   
   cpuUsageHistory.push(usage)
   if (cpuUsageHistory.length > 60) cpuUsageHistory.shift()
@@ -141,230 +228,178 @@ function getAllDisks() {
 }
 
 // Calculate network speed with real stats
-function getNetworkSpeed() {
-  const now = Date.now()
-  const delta = (now - lastNetTime) / 1000
-  
-  // Get network interface stats
-  const interfaces = os.networkInterfaces()
-  let rx = 0, tx = 0
-  
-  // Simulate realistic network speeds (replace with actual network stats if available)
-  rx = Math.random() * 5 * 1024 * 1024 // 0-5 MB/s
-  tx = Math.random() * 2 * 1024 * 1024  // 0-2 MB/s
-  
-  lastNetStats = { rx, tx }
-  lastNetTime = now
-  
-  return { rx, tx }
+async function getNetworkSpeed() {
+  const rows = await runPowerShellJson<CounterSampleRow[] | CounterSampleRow>(
+    "Get-Counter '\\Network Interface(*)\\Bytes Received/sec','\\Network Interface(*)\\Bytes Sent/sec' | Select-Object -ExpandProperty CounterSamples | Select-Object Path,CookedValue | ConvertTo-Json -Compress"
+  )
+
+  const samples = Array.isArray(rows) ? rows : rows ? [rows] : []
+  return samples.reduce<NetworkSnapshot>((acc, sample) => {
+    const value = typeof sample.CookedValue === 'number' ? sample.CookedValue : 0
+    const path = (sample.Path ?? '').toLowerCase()
+    if (path.includes('bytes received/sec')) acc.rx += value
+    if (path.includes('bytes sent/sec')) acc.tx += value
+    return acc
+  }, { rx: 0, tx: 0 })
 }
 
 // Get detailed battery information
-function getDetailedBatteryInfo() {
-  try {
-    const powerSave = powerMonitor.isOnBatteryPower()
-    const batteryLevel = powerMonitor.getBatteryLevel?.() ?? 1
-    
-    // Calculate battery health based on level and discharge rate
-    const percent = Math.round(batteryLevel * 100)
-    const timeRemaining = powerSave ? 120 : 0 // Simulated time remaining
-    
-    // Track battery history
-    batteryHistory.push(percent)
-    if (batteryHistory.length > 60) batteryHistory.shift()
-    
-    // Calculate health status
-    let health = 'Good'
-    let healthPercent = 95
-    
-    if (percent < 80) {
-      health = 'Fair'
-      healthPercent = 85
-    } else if (percent < 60) {
-      health = 'Poor'
-      healthPercent = 70
-    } else if (percent < 40) {
-      health = 'Critical'
-      healthPercent = 50
-    }
-    
-    // Calculate estimated cycles (simulated)
-    const cycles = Math.floor(Math.random() * 200) + 50
-    
-    // Calculate voltage (simulated)
-    const voltage = 11.1 + (Math.random() * 0.5)
-    
-    // Calculate temperature (simulated)
-    const temperature = 25 + Math.floor(Math.random() * 15)
-    
-    // Calculate discharge rate (if discharging)
-    const dischargeRate = powerSave ? (Math.random() * 5 + 5) : 0
-    
-    // Calculate time to full (if charging)
-    const timeToFull = !powerSave && percent < 100 ? Math.floor((100 - percent) * 1.5) : 0
-    
-    return {
-      hasBattery: true,
-      percent,
-      discharging: powerSave,
-      timeRemaining: powerSave ? Math.floor(Math.random() * 180) + 60 : 0,
-      timeToFull,
-      health,
-      healthPercent,
-      cycles,
-      voltage: parseFloat(voltage.toFixed(1)),
-      temperature,
-      dischargeRate: parseFloat(dischargeRate.toFixed(1)),
-      capacity: percent,
-      designCapacity: 100,
-      fullChargeCapacity: percent,
-      history: batteryHistory.slice(-20)
-    }
-  } catch (error) {
-    console.error('Battery info error:', error)
+async function getDetailedBatteryInfo() {
+  const reading = await runPowerShellJson<BatteryReading | BatteryReading[]>(
+    "$ErrorActionPreference='Stop'; $battery = Get-CimInstance Win32_Battery | Select-Object -First 1 EstimatedChargeRemaining,BatteryStatus,EstimatedRunTime,Name; if ($null -eq $battery) { 'null' } else { $battery | ConvertTo-Json -Compress }"
+  )
+
+  const battery = Array.isArray(reading) ? reading[0] : reading
+  if (!battery || typeof battery.EstimatedChargeRemaining !== 'number') {
     return {
       hasBattery: false,
-      percent: 100,
+      percent: 0,
       discharging: false,
       timeRemaining: 0,
       timeToFull: 0,
-      health: 'N/A',
+      health: 'Unavailable',
       healthPercent: 0,
       cycles: 0,
       voltage: 0,
       temperature: 0,
       dischargeRate: 0,
-      capacity: 100,
-      designCapacity: 100,
-      fullChargeCapacity: 100,
+      capacity: 0,
+      designCapacity: 0,
+      fullChargeCapacity: 0,
       history: []
     }
+  }
+
+  const percent = Math.max(0, Math.min(100, Math.round(battery.EstimatedChargeRemaining)))
+  const batteryStatus = battery.BatteryStatus ?? 0
+  const chargingStatuses = new Set([6, 7, 8, 9, 11])
+  const discharging = powerMonitor.isOnBatteryPower() || (!chargingStatuses.has(batteryStatus) && percent < 100)
+  const estimatedRunTimeMinutes = typeof battery.EstimatedRunTime === 'number' ? battery.EstimatedRunTime : 0
+  const runtimeKnown = estimatedRunTimeMinutes > 0 && estimatedRunTimeMinutes < 1440
+
+  batteryHistory.push(percent)
+  if (batteryHistory.length > 60) batteryHistory.shift()
+
+  const healthPercent = percent >= 80 ? 95 : percent >= 60 ? 85 : percent >= 40 ? 70 : 50
+  const health = healthPercent >= 95 ? 'Good' : healthPercent >= 85 ? 'Fair' : healthPercent >= 70 ? 'Poor' : 'Critical'
+
+  return {
+    hasBattery: true,
+    percent,
+    discharging,
+    timeRemaining: discharging && runtimeKnown ? estimatedRunTimeMinutes * 60 : 0,
+    timeToFull: !discharging && percent < 100 && runtimeKnown ? estimatedRunTimeMinutes * 60 : 0,
+    health,
+    healthPercent,
+    cycles: 0,
+    voltage: 0,
+    temperature: 0,
+    dischargeRate: 0,
+    capacity: percent,
+    designCapacity: 100,
+    fullChargeCapacity: percent,
+    history: batteryHistory.slice(-20)
   }
 }
 
 // Get WiFi info with real data
-function getWiFiInfo() {
+function getWiFiInfo(): Array<{
+  iface: string
+  ip4: string
+  mac: string
+  operstate: string
+  type: 'wireless'
+  speed: number
+  ssid?: string
+  signal?: number
+  channel?: number
+  frequency?: number
+}> {
   const interfaces = os.networkInterfaces()
   const wifiInterfaces = []
-  
+
   for (const [name, addrs] of Object.entries(interfaces)) {
-    if (addrs && (name.includes('wlan') || name.includes('wi-fi') || name.includes('wlp') || name.includes('wireless'))) {
-      for (const addr of addrs) {
-        if (!addr.internal && addr.family === 'IPv4') {
-          // Simulate signal strength based on interface name
-          const signal = Math.floor(Math.random() * 30) + 70 // 70-100%
-          const speed = Math.floor(Math.random() * 400) + 100 // 100-500 Mbps
-          
-          wifiInterfaces.push({
-            iface: name,
-            ip4: addr.address,
-            mac: addr.mac,
-            operstate: 'up',
-            type: 'wireless',
-            speed,
-            ssid: `Network-${Math.floor(Math.random() * 1000)}`,
-            signal,
-            channel: Math.floor(Math.random() * 11) + 1,
-            frequency: [2.4, 5][Math.floor(Math.random() * 2)]
-          })
-        }
+    const isWireless = /wlan|wi-?fi|wireless|802\.11/i.test(name)
+    if (!addrs || !isWireless) continue
+
+    for (const addr of addrs) {
+      if (!addr.internal && addr.family === 'IPv4') {
+        wifiInterfaces.push({
+          iface: name,
+          ip4: addr.address,
+          mac: addr.mac,
+          operstate: 'up',
+          type: 'wireless' as const,
+          speed: 0
+        })
       }
     }
   }
-  
+
   return wifiInterfaces
 }
 
-// Get Bluetooth info with real detection
+// Bluetooth queries are blocked on many Windows setups without elevated CIM access.
 function getBluetoothInfo() {
-  // Simulate Bluetooth device detection
-  const devices = []
-  const deviceCount = Math.floor(Math.random() * 4) // 0-3 devices
-  
-  const deviceNames = ['Mouse', 'Keyboard', 'Headphones', 'Speaker', 'Phone', 'Tablet']
-  
-  for (let i = 0; i < deviceCount; i++) {
-    devices.push({
-      name: deviceNames[Math.floor(Math.random() * deviceNames.length)],
-      address: `${Math.random().toString(16).substring(2, 4)}:${Math.random().toString(16).substring(2, 4)}:${Math.random().toString(16).substring(2, 4)}:${Math.random().toString(16).substring(2, 4)}:${Math.random().toString(16).substring(2, 4)}:${Math.random().toString(16).substring(2, 4)}`,
-      connected: Math.random() > 0.3,
-      battery: Math.floor(Math.random() * 100),
-      type: ['input', 'audio', 'network'][Math.floor(Math.random() * 3)]
-    })
-  }
-  
   return {
-    available: true,
-    enabled: true,
-    devices,
-    adapter: {
-      name: 'Intel Wireless Bluetooth',
-      version: '5.2',
-      mac: '00:1A:7D:DA:71:13'
-    }
+    available: false,
+    enabled: false,
+    devices: []
   }
 }
 
 // Get process list with real system processes
-function getProcessList(totalMem: number) {
-  const processes = [
-    { 
-      pid: process.pid, 
-      name: 'ED-DESK', 
-      cpu: getRealCPUUsage(), 
-      mem: (process.memoryUsage().rss / totalMem) * 100,
-      threads: 12,
-      priority: 'Normal'
-    },
-    { 
-      pid: 4, 
-      name: 'System', 
-      cpu: 2.5 + Math.random() * 2, 
-      mem: 1.2 + Math.random(),
-      threads: 128,
-      priority: 'High'
-    },
-    { 
-      pid: 8, 
-      name: 'Kernel', 
-      cpu: 1.8 + Math.random(), 
-      mem: 0.8 + Math.random() * 0.5,
-      threads: 64,
-      priority: 'High'
-    },
-    { 
-      pid: 16, 
-      name: 'Graphics', 
-      cpu: 3.2 + Math.random() * 3, 
-      mem: 2.1 + Math.random(),
-      threads: 32,
-      priority: 'Normal'
-    },
-    { 
-      pid: 24, 
-      name: 'Audio', 
-      cpu: 1.2 + Math.random(), 
-      mem: 0.5 + Math.random(),
-      threads: 16,
-      priority: 'Normal'
-    },
-    { 
-      pid: 32, 
-      name: 'Network', 
-      cpu: 2.1 + Math.random() * 2, 
-      mem: 0.9 + Math.random(),
-      threads: 24,
-      priority: 'Normal'
-    }
-  ]
-  
-  return processes
+async function getProcessList(totalMem: number) {
+  const rows = await runPowerShellJson<PowerShellProcessRow[] | PowerShellProcessRow>(
+    "Get-Process | Select-Object Id,ProcessName,CPU,WorkingSet64,PriorityClass,@{Name='Threads';Expression={$_.Threads.Count}} | ConvertTo-Json -Compress"
+  )
+
+  const processes = (Array.isArray(rows) ? rows : rows ? [rows] : [])
+  const sampledAt = Date.now()
+  const cpuCount = Math.max(os.cpus().length, 1)
+  const nextSnapshot = new Map<number, { cpuSeconds: number; sampledAt: number }>()
+
+  const normalized = processes
+    .filter((row) => typeof row.Id === 'number' && typeof row.ProcessName === 'string')
+    .map((row) => {
+      const cpuSeconds = typeof row.CPU === 'number' ? row.CPU : 0
+      const previous = previousProcessSnapshot.get(row.Id)
+      const elapsedSeconds = previous ? Math.max((sampledAt - previous.sampledAt) / 1000, 0.5) : 0
+      const cpu = previous
+        ? Math.max(0, Math.min(100, ((cpuSeconds - previous.cpuSeconds) / elapsedSeconds / cpuCount) * 100))
+        : 0
+
+      nextSnapshot.set(row.Id, { cpuSeconds, sampledAt })
+
+      return {
+        pid: row.Id,
+        name: row.ProcessName,
+        cpu: Number(cpu.toFixed(1)),
+        mem: Number((((row.WorkingSet64 ?? 0) / totalMem) * 100).toFixed(2)),
+        threads: row.Threads ?? 0,
+        priority: row.PriorityClass == null ? 'Unknown' : String(row.PriorityClass)
+      }
+    })
+    .sort((a, b) => {
+      if (b.cpu !== a.cpu) return b.cpu - a.cpu
+      return b.mem - a.mem
+    })
+
+  previousProcessSnapshot = nextSnapshot
+
+  return normalized.slice(0, 12)
 }
 
 app.whenReady().then(async () => {
-  backendService = new OfflineBackendService()
-  await backendService.start()
   createWindow()
+
+  try {
+    backendService = new OfflineBackendService()
+    await backendService.start()
+  } catch (error) {
+    console.error('Offline backend failed to start:', error)
+    backendService = null
+  }
 
   // ==================== SYSTEM INFORMATION HANDLERS ====================
 
@@ -377,6 +412,11 @@ app.whenReady().then(async () => {
       const cpuCurrent = getRealCPUUsage()
       const disks = getAllDisks()
       const uptime = os.uptime()
+      const [windowsInfo, processes, batteryInfo] = await Promise.all([
+        getWindowsInfo(),
+        getProcessList(totalMem),
+        getDetailedBatteryInfo()
+      ])
       
       // Get all network interfaces
       const networkInterfaces = os.networkInterfaces()
@@ -396,7 +436,7 @@ app.whenReady().then(async () => {
                 mac: net.mac,
                 operstate: 'up',
                 type: wifi ? 'wireless' : 'wired',
-                speed: wifi ? wifi.speed : 1000,
+                speed: wifi ? wifi.speed : 0,
                 ssid: wifi?.ssid,
                 signal: wifi?.signal,
                 channel: wifi?.channel,
@@ -407,19 +447,6 @@ app.whenReady().then(async () => {
         }
       }
 
-      // Get process list
-      const processes = getProcessList(totalMem)
-
-      // Get users
-      let users = 1
-      try {
-        users = Object.keys(os.userInfo()).length
-      } catch {
-        users = 1
-      }
-
-      // Get detailed battery info
-      const batteryInfo = getDetailedBatteryInfo()
       const bluetoothInfo = getBluetoothInfo()
 
       // Get system load averages
@@ -432,19 +459,19 @@ app.whenReady().then(async () => {
           brand: cpus[0]?.model || 'Unknown CPU',
           speed: cpus[0]?.speed || 0,
           cores: cpus.length,
-          physicalCores: Math.floor(cpus.length / 2) || cpus.length,
+          physicalCores: cpus.length,
           usage: cpuCurrent,
-          temperature: 42 + Math.floor(Math.random() * 15),
+          temperature: 0,
           load: loadAvg[0],
-          cache: { l1d: 32768, l1i: 32768, l2: 262144, l3: 8388608 }
+          cache: {}
         },
         memory: {
           total: totalMem,
           free: freeMem,
           used: usedMem,
-          active: usedMem * 0.85,
-          available: freeMem + (usedMem * 0.15),
-          buffcache: usedMem * 0.1,
+          active: usedMem,
+          available: freeMem,
+          buffcache: 0,
           swaptotal: 0,
           swapused: 0,
           percent: Math.round((usedMem / totalMem) * 100)
@@ -452,14 +479,14 @@ app.whenReady().then(async () => {
         disk: disks,
         os: {
           platform: process.platform,
-          distro: os.type(),
-          release: os.release(),
+          distro: windowsInfo.WindowsProductName || os.type(),
+          release: windowsInfo.OsVersion || os.release(),
           kernel: os.version() || os.release(),
-          arch: os.arch(),
+          arch: typeof os.machine === 'function' ? os.machine() : os.arch(),
           hostname: os.hostname(),
           uptime: uptime,
           build: os.release(),
-          users: users,
+          users: 1,
           loadavg: loadAvg
         },
         network: networks,
@@ -483,13 +510,11 @@ app.whenReady().then(async () => {
 
   ipcMain.handle('get-cpu-history', () => cpuUsageHistory)
   
-  ipcMain.handle('get-network-speed', () => {
-    return getNetworkSpeed()
-  })
+  ipcMain.handle('get-network-speed', async () => await getNetworkSpeed())
   
-  ipcMain.handle('get-power-info', () => ({
+  ipcMain.handle('get-power-info', async () => ({
     onBattery: powerMonitor.isOnBatteryPower(),
-    level: (powerMonitor.getBatteryLevel?.() || 1) * 100,
+    level: (await getDetailedBatteryInfo()).percent,
     charging: !powerMonitor.isOnBatteryPower()
   }))
 
@@ -520,8 +545,23 @@ app.whenReady().then(async () => {
 
   ipcMain.handle('offline:get-status', () => backendService?.getStatus() ?? null)
   ipcMain.handle('offline:get-profile', () => backendService?.getProfile() ?? null)
+  ipcMain.handle('offline:get-permissions', () => backendService?.getPermissions())
+  ipcMain.handle('offline:update-permissions', (_event, payload) => backendService?.updatePermissions(payload))
   ipcMain.handle('offline:scan-peers', () => backendService?.scanPeers() ?? [])
   ipcMain.handle('offline:list-peers', () => backendService?.listPeers() ?? [])
+  ipcMain.handle('offline:list-sessions', () => backendService?.listAvailableSessions() ?? [])
+  ipcMain.handle('offline:get-hosted-session', () => backendService?.getHostedSession() ?? null)
+  ipcMain.handle('offline:create-hosted-session', (_event, payload) => {
+    if (!backendService) throw new Error('Offline backend is not running.')
+    return backendService.createHostedSession(payload)
+  })
+  ipcMain.handle('offline:close-hosted-session', () => {
+    backendService?.closeHostedSession()
+  })
+  ipcMain.handle('offline:join-session', async (_event, code: string, password?: string) => {
+    if (!backendService) throw new Error('Offline backend is not running.')
+    return await backendService.joinSessionByCode(code, password)
+  })
   ipcMain.handle('offline:list-conversations', () => backendService?.listConversations() ?? [])
   ipcMain.handle('offline:get-messages', (_event, conversationId: string) => {
     return backendService?.getMessages(conversationId) ?? []

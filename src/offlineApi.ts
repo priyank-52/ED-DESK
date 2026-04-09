@@ -7,6 +7,17 @@ export interface PeerRecord {
   transport: 'wifi'
   capabilities: string[]
   lastSeen: number
+  hostedSession: HostedSessionSummary | null
+}
+
+export interface HostedSessionSummary {
+  code: string
+  name: string
+  description: string
+  visibility: 'public' | 'private'
+  passwordRequired: boolean
+  participantCount: number
+  updatedAt: number
 }
 
 export interface ConversationRecord {
@@ -95,13 +106,47 @@ export interface BackendStatus {
   conversations: number
   assessments: number
   recordsInLedger: number
+  activeHostedSession: HostedSessionSummary | null
+}
+
+export interface SessionRecord {
+  id: string
+  code: string
+  name: string
+  description: string
+  hostPeerId: string
+  hostDisplayName: string
+  visibility: 'public' | 'private'
+  password: string | null
+  participantPeerIds: string[]
+  createdAt: number
+  updatedAt: number
+  status: 'waiting' | 'active'
+}
+
+export interface DevicePermissions {
+  nearbyScan: 'prompt' | 'granted' | 'denied'
+  localNetwork: 'granted'
 }
 
 export const offlineApi = {
   getStatus: () => window.electronAPI.offline.getStatus() as Promise<BackendStatus | null>,
   getProfile: () => window.electronAPI.offline.getProfile() as Promise<{ peerId: string; displayName: string } | null>,
+  getPermissions: () => window.electronAPI.offline.getPermissions() as Promise<DevicePermissions>,
+  updatePermissions: (payload: Partial<DevicePermissions>) => window.electronAPI.offline.updatePermissions(payload) as Promise<DevicePermissions>,
   scanPeers: () => window.electronAPI.offline.scanPeers() as Promise<PeerRecord[]>,
   listPeers: () => window.electronAPI.offline.listPeers() as Promise<PeerRecord[]>,
+  listSessions: () => window.electronAPI.offline.listSessions() as Promise<Array<SessionRecord & { address: string; peerStatus: PeerRecord['status'] }>>,
+  getHostedSession: () => window.electronAPI.offline.getHostedSession() as Promise<SessionRecord | null>,
+  createHostedSession: (payload: {
+    code?: string
+    name: string
+    description: string
+    visibility: 'public' | 'private'
+    password?: string
+  }) => window.electronAPI.offline.createHostedSession(payload) as Promise<SessionRecord>,
+  closeHostedSession: () => window.electronAPI.offline.closeHostedSession() as Promise<void>,
+  joinSessionByCode: (code: string, password?: string) => window.electronAPI.offline.joinSessionByCode(code, password) as Promise<SessionRecord>,
   listConversations: () => window.electronAPI.offline.listConversations() as Promise<ConversationRecord[]>,
   getMessages: (conversationId: string) => window.electronAPI.offline.getMessages(conversationId) as Promise<ChatMessageRecord[]>,
   sendMessage: (peerId: string, content: string) => window.electronAPI.offline.sendMessage(peerId, content) as Promise<ChatMessageRecord>,

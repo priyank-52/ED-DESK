@@ -1,4 +1,4 @@
-// @ts-nocheck
+﻿// @ts-nocheck
 import React, { useState, useEffect, useRef } from 'react'
 
 // ==================== TYPES ====================
@@ -139,16 +139,35 @@ interface Block {
   difficulty: number
 }
 
+interface HomeSnapshotCache {
+  sys: FullSystemInfo | null
+  cpuHistory: number[]
+  networkSpeed: { rx: number; tx: number }
+  logs: string[]
+  updatedAt: number
+}
+
+const homeSnapshotCache: HomeSnapshotCache = {
+  sys: null,
+  cpuHistory: [],
+  networkSpeed: { rx: 0, tx: 0 },
+  logs: [],
+  updatedAt: 0
+}
+
 // ==================== COMPONENT ====================
 
 export default function Home() {
+  const homeRef = useRef<HTMLDivElement | null>(null)
+  const fetchInFlightRef = useRef(false)
+  const isMountedRef = useRef(true)
 
-  // ── State ──
-  const [sys, setSys] = useState<FullSystemInfo | null>(null)
-  const [cpuHistory, setCpuHistory] = useState<number[]>([])
-  const [networkSpeed, setNetworkSpeed] = useState({ rx: 0, tx: 0 })
+  // â”€â”€ State â”€â”€
+  const [sys, setSys] = useState<FullSystemInfo | null>(homeSnapshotCache.sys)
+  const [cpuHistory, setCpuHistory] = useState<number[]>(homeSnapshotCache.cpuHistory)
+  const [networkSpeed, setNetworkSpeed] = useState(homeSnapshotCache.networkSpeed)
   const [time, setTime] = useState(new Date())
-  const [logs, setLogs] = useState<string[]>([])
+  const [logs, setLogs] = useState<string[]>(homeSnapshotCache.logs)
 
   const [nodes, setNodes] = useState<BlockchainNode[]>([
     { id: 'node-1', name: 'Validator Node 1', status: 'active', blocks: 1245678, peers: 24, hash: '0x7f83b1657ff1fc53b92dc18148a1d65d7f83b165', lastBlock: '0x3a5e7f8b9c1d2e3f', transactions: 156, latency: 45, stake: 150000, version: 'v2.1.4' },
@@ -172,67 +191,80 @@ export default function Home() {
     { height: 1245676, hash: '0x1f4b7e9a2c5d8f0b3e6a9c2d5f8b1e4', timestamp: new Date(Date.now() - 540000), transactions: 168, size: 2510, miner: '0x4b68...bfa3', difficulty: 17400000000 },
   ])
 
-  // ── Effects ──
+  // â”€â”€ Effects â”€â”€
 
   useEffect(() => {
-    const timer = setInterval(() => setTime(new Date()), 1000)
+    const timer = setInterval(() => setTime(new Date()), 30000)
     return () => clearInterval(timer)
+  }, [])
+
+  useEffect(() => {
+    isMountedRef.current = true
+    return () => {
+      isMountedRef.current = false
+    }
   }, [])
 
   // Real system data via Electron IPC
   useEffect(() => {
     const fetchSystem = async () => {
+      if (document.hidden || fetchInFlightRef.current) return
+      fetchInFlightRef.current = true
+
       try {
-        const data = await window.electronAPI.getFullSystemInfo()
+        const [data, history, speed] = await Promise.all([
+          window.electronAPI.getFullSystemInfo(),
+          window.electronAPI.getCPUHistory(),
+          window.electronAPI.getNetworkSpeed()
+        ])
+
+        if (!isMountedRef.current || document.hidden) return
+
         if (data) {
           setSys(data)
-          setLogs([`[${new Date().toLocaleTimeString('en-US', { hour12: false })}] System updated`])
+          homeSnapshotCache.sys = data
+          setLogs(prev => {
+            const nextEntry = `[${new Date().toLocaleTimeString('en-US', { hour12: false })}] System updated`
+            const nextLogs = prev[0] === nextEntry ? prev : [nextEntry]
+            homeSnapshotCache.logs = nextLogs
+            homeSnapshotCache.updatedAt = Date.now()
+            return nextLogs
+          })
         }
-        const history = await window.electronAPI.getCPUHistory()
         setCpuHistory(history)
-        const speed = await window.electronAPI.getNetworkSpeed()
         setNetworkSpeed(speed)
+        homeSnapshotCache.cpuHistory = history
+        homeSnapshotCache.networkSpeed = speed
       } catch (error) {
         console.error('System fetch failed:', error)
-        setLogs([`[${new Date().toLocaleTimeString('en-US', { hour12: false })}] Error fetching system data`])
+        if (isMountedRef.current) {
+          const nextLogs = [`[${new Date().toLocaleTimeString('en-US', { hour12: false })}] Error fetching system data`]
+          setLogs(nextLogs)
+          homeSnapshotCache.logs = nextLogs
+        }
+      } finally {
+        fetchInFlightRef.current = false
       }
     }
-    fetchSystem()
-    const interval = setInterval(fetchSystem, 2000)
-    return () => clearInterval(interval)
+
+    const cacheIsFresh = homeSnapshotCache.sys && Date.now() - homeSnapshotCache.updatedAt < 15000
+    if (!cacheIsFresh) {
+      void fetchSystem()
+    }
+    const interval = setInterval(fetchSystem, 15000)
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        void fetchSystem()
+      }
+    }
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    return () => {
+      clearInterval(interval)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+    }
   }, [])
 
-  // Live blockchain simulation
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setNodes(prev => prev.map(node => {
-        const statuses: ('active' | 'syncing' | 'validating' | 'mining')[] = ['active', 'syncing', 'validating', 'mining']
-        return {
-          ...node,
-          status: Math.random() > 0.8 ? statuses[Math.floor(Math.random() * statuses.length)] : node.status,
-          blocks: node.blocks + (Math.random() > 0.95 ? 1 : 0),
-          transactions: node.transactions + (Math.random() > 0.7 ? Math.floor(Math.random() * 3) : 0),
-          latency: Math.max(10, node.latency + (Math.random() > 0.5 ? -1 : 1) * Math.floor(Math.random() * 5)),
-        }
-      }))
-      setTransactions(prev => prev.map(tx => {
-        if (tx.status === 'pending' && Math.random() > 0.4) return { ...tx, status: 'confirmed' as const, block: blocks[0].height + 1, confirmations: 1 }
-        if (tx.status === 'confirmed' && tx.confirmations < 100 && Math.random() > 0.7) return { ...tx, confirmations: tx.confirmations + 1 }
-        return tx
-      }))
-      if (Math.random() > 0.7) {
-        const fromNodes = nodes.map(n => n.hash.slice(0, 10))
-        const toNodes = nodes.map(n => n.hash.slice(0, 10))
-        setTransactions(prev => [{ id: `tx-${Date.now()}`, from: fromNodes[Math.floor(Math.random() * fromNodes.length)], to: toNodes[Math.floor(Math.random() * toNodes.length)], amount: Math.random() * 50, fee: Math.random() * 0.005, timestamp: new Date(), status: 'pending', hash: `0x${Math.random().toString(36).substring(2, 10)}${Math.random().toString(36).substring(2, 10)}`, confirmations: 0 }, ...prev.slice(0, 19)])
-      }
-      if (Math.random() > 0.8) {
-        setBlocks(prev => [{ height: prev[0].height + 1, hash: `0x${Math.random().toString(36).substring(2, 15)}${Math.random().toString(36).substring(2, 15)}`, timestamp: new Date(), transactions: Math.floor(Math.random() * 200) + 100, size: Math.floor(Math.random() * 1000) + 2000, miner: nodes[Math.floor(Math.random() * nodes.length)].hash.slice(0, 10), difficulty: prev[0].difficulty + Math.floor(Math.random() * 100000000) }, ...prev.slice(0, 9)])
-      }
-    }, 8000)
-    return () => clearInterval(interval)
-  }, [blocks, nodes])
-
-  // ── Utilities ──
+  // â”€â”€ Utilities â”€â”€
 
   const formatBytes = (bytes: number): string => {
     if (bytes === 0) return '0 B'
@@ -245,9 +277,11 @@ export default function Home() {
     const days = Math.floor(seconds / 86400)
     const hours = Math.floor((seconds % 86400) / 3600)
     const minutes = Math.floor((seconds % 3600) / 60)
+    const remainingSeconds = Math.floor(seconds % 60)
     if (days > 0) return `${days}d ${hours}h ${minutes}m`
-    if (hours > 0) return `${hours}h ${minutes}m`
-    return `${minutes}m`
+    if (hours > 0) return `${hours}h ${minutes}m ${remainingSeconds}s`
+    if (minutes > 0) return `${minutes}m ${remainingSeconds}s`
+    return `${remainingSeconds}s`
   }
 
   const formatTime = (date: Date): string =>
@@ -256,7 +290,7 @@ export default function Home() {
   const formatHash = (hash: string): string =>
     hash.length <= 12 ? hash : `${hash.slice(0, 8)}...${hash.slice(-4)}`
 
-  // ── Loading screen ──
+  // â”€â”€ Loading screen â”€â”€
   if (!sys) {
     return (
       <div className="h-loading">
@@ -295,12 +329,21 @@ export default function Home() {
     iface: 'Wi-Fi', ip4: '0.0.0.0', mac: '00:00:00:00:00:00', speed: 0,
     operstate: 'down', type: 'wireless', ssid: 'No Connection', signal: 0
   }
+  const isOnline = sys.network.some((network) => network.operstate === 'up' && Boolean(network.ip4) && network.ip4 !== '127.0.0.1')
+  const batteryStatusLabel = !sys.battery.hasBattery
+    ? 'NOT DETECTED'
+    : sys.battery.percent >= 100 && !sys.battery.discharging
+      ? 'FULL'
+      : sys.battery.discharging
+        ? 'DISCHARGING'
+        : 'CHARGING'
+  const batteryTimeLabel = sys.battery.timeRemaining > 0 ? `${Math.floor(sys.battery.timeRemaining / 60)} min` : 'Unknown'
+  const batteryChargeLabel = sys.battery.timeToFull > 0 ? `${Math.floor(sys.battery.timeToFull / 60)} min` : 'Unknown'
 
   return (
-    <div className="h-app">
+    <div ref={homeRef} className="h-app">
 
-      {/* ── ASCII HEADER — flush below navbar, no margin ── */}
-      <div className="h-ascii-header">
+       <div className="h-ascii-header">
         <pre className="h-glitch">{`  ███████╗██████╗       ██████╗ ███████╗███████╗██╗  ██╗
   ██╔════╝██╔══██╗      ██╔══██╗██╔════╝██╔════╝██║ ██╔╝
   █████╗  ██║  ██║█████╗██║  ██║█████╗  ███████╗█████╔╝ 
@@ -315,8 +358,7 @@ export default function Home() {
           </div>
         </div>
       </div>
-
-      {/* ── SYSTEM MONITOR DASHBOARD ── */}
+      {/* â”€â”€ SYSTEM MONITOR DASHBOARD â”€â”€ */}
       <div className="h-dashboard">
 
         {/* CPU */}
@@ -327,9 +369,9 @@ export default function Home() {
           </div>
           <div className="h-card-body">
             <div className="h-row"><span>MODEL</span><span className="h-truncate">{sys.cpu.brand}</span></div>
-            <div className="h-row"><span>CORES</span><span>{sys.cpu.cores} ({sys.cpu.physicalCores}P)</span></div>
+            <div className="h-row"><span>CORES</span><span>{sys.cpu.cores} logical</span></div>
             <div className="h-row"><span>SPEED</span><span>{sys.cpu.speed} MHz</span></div>
-            <div className="h-row"><span>TEMP</span><span className={sys.cpu.temperature > 80 ? 'h-warn' : ''}>{sys.cpu.temperature}°C</span></div>
+            <div className="h-row"><span>TEMP</span><span>{sys.cpu.temperature > 0 ? `${sys.cpu.temperature}°C` : 'Unavailable'}</span></div>
             <div className="h-bar"><div className="h-bar-fill" style={{ width: `${sys.cpu.usage}%` }} /></div>
             <div className="h-sparkline">
               {cpuHistory.slice(-20).map((v, i) => (
@@ -380,7 +422,7 @@ export default function Home() {
         <div className="h-card">
           <div className="h-card-head">
             <span className="h-card-title">NETWORK</span>
-            <span className="h-card-val">↓{(networkSpeed.rx / 1024).toFixed(0)}K</span>
+            <span className="h-card-val">{formatBytes(networkSpeed.rx)}/s</span>
           </div>
           <div className="h-card-body">
             <div className="h-net-sec">
@@ -390,20 +432,20 @@ export default function Home() {
                   {wifi.operstate === 'up' ? 'ON' : 'OFF'}
                 </span>
               </div>
-              <div className="h-row h-small"><span>{wifi.ip4}</span><span>{wifi.speed} Mbps</span></div>
-              <div className="h-row h-small"><span className="h-mono">{wifi.mac}</span>{wifi.ssid && <span>{wifi.ssid}</span>}</div>
+              <div className="h-row h-small"><span>{wifi.ip4}</span><span>{wifi.speed > 0 ? `${wifi.speed} Mbps` : 'Speed unavailable'}</span></div>
+              <div className="h-row h-small"><span className="h-mono">{wifi.mac}</span><span>{wifi.ssid || 'SSID unavailable'}</span></div>
               {wifi.channel && <div className="h-row h-small"><span>Ch {wifi.channel}</span><span>{wifi.frequency}GHz</span></div>}
             </div>
             <div className="h-net-sec">
               <div className="h-row">
                 <span>BLUETOOTH</span>
                 <span className={`h-badge ${sys.bluetooth.enabled ? 'h-badge-on' : 'h-badge-off'}`}>
-                  {sys.bluetooth.enabled ? 'ON' : 'OFF'}
+                  {sys.bluetooth.available ? (sys.bluetooth.enabled ? 'ON' : 'OFF') : 'N/A'}
                 </span>
               </div>
               <div className="h-row h-small">
                 <span>DEVICES</span>
-                <span>{sys.bluetooth.devices.filter(d => d.connected).length} connected</span>
+                <span>{sys.bluetooth.available ? `${sys.bluetooth.devices.filter(d => d.connected).length} connected` : 'Access unavailable'}</span>
               </div>
             </div>
             <div className="h-row h-small"><span>RX</span><span>{formatBytes(networkSpeed.rx)}/s</span></div>
@@ -431,15 +473,16 @@ export default function Home() {
         <div className="h-card">
           <div className="h-card-head">
             <span className="h-card-title">PROCESSES</span>
-            <span className="h-card-val">PID • CPU</span>
+            <span className="h-card-val">PID / CPU / MEM</span>
           </div>
           <div className="h-card-body">
-            {sys.processes.slice(0, 5).map((proc, i) => (
-              <div key={i} className="h-proc-row">
+            {sys.processes.slice(0, 5).map((proc) => (
+              <div key={proc.pid} className="h-proc-row">
                 <span className="h-proc-pid">{proc.pid}</span>
                 <span className="h-proc-name">{proc.name}</span>
                 <div className="h-proc-right">
                   <span className="h-proc-cpu">{proc.cpu.toFixed(1)}%</span>
+                  <span className="h-proc-mem">{proc.mem.toFixed(1)}%</span>
                   <div className="h-proc-bar"><div className="h-proc-fill" style={{ width: `${Math.min(proc.cpu * 4, 100)}%` }} /></div>
                 </div>
               </div>
@@ -462,22 +505,23 @@ export default function Home() {
               <>
                 <div className="h-row">
                   <span>STATUS</span>
-                  <span className={sys.battery.discharging ? 'h-warn-soft' : 'h-ok'}>{sys.battery.discharging ? 'DISCHARGING' : 'CHARGING'}</span>
+                  <span className={sys.battery.discharging ? 'h-warn-soft' : 'h-ok'}>{batteryStatusLabel}</span>
                 </div>
-                <div className="h-row"><span>REMAINING</span><span>{Math.floor(sys.battery.timeRemaining / 60)} min</span></div>
+                <div className="h-row"><span>REMAINING</span><span>{batteryTimeLabel}</span></div>
                 {!sys.battery.discharging && sys.battery.timeToFull > 0 && (
-                  <div className="h-row"><span>TO FULL</span><span>{Math.floor(sys.battery.timeToFull / 60)} min</span></div>
+                  <div className="h-row"><span>TO FULL</span><span>{batteryChargeLabel}</span></div>
                 )}
-                <div className="h-row"><span>VOLTAGE</span><span>{sys.battery.voltage}V</span></div>
-                <div className="h-row"><span>TEMP</span><span>{sys.battery.temperature}°C</span></div>
-                {sys.battery.discharging && <div className="h-row"><span>DISCHARGE</span><span>{sys.battery.dischargeRate} W</span></div>}
+                <div className="h-row"><span>CAPACITY</span><span>{sys.battery.capacity}%</span></div>
+                <div className="h-row"><span>VOLTAGE</span><span>{sys.battery.voltage > 0 ? `${sys.battery.voltage}V` : 'Unknown'}</span></div>
+                <div className="h-row"><span>TEMP</span><span>{sys.battery.temperature > 0 ? `${sys.battery.temperature}°C` : 'Unavailable'}</span></div>
+                {sys.battery.discharging && <div className="h-row"><span>DISCHARGE</span><span>{sys.battery.dischargeRate > 0 ? `${sys.battery.dischargeRate} W` : 'Unavailable'}</span></div>}
                 <div className="h-bar" style={{ marginTop: 6 }}>
                   <div className="h-bar-fill" style={{ width: `${sys.battery.percent}%`, background: sys.battery.percent < 20 ? '#c86060' : sys.battery.percent < 40 ? '#c8964a' : '#1e3a5f' }} />
                 </div>
               </>
             ) : (
               <>
-                <div className="h-row"><span>POWER</span><span className="h-ok">AC • 230V</span></div>
+                <div className="h-row"><span>POWER</span><span className="h-ok">AC / 230V</span></div>
                 <div className="h-row h-small"><span>BATTERY</span><span>Not detected</span></div>
               </>
             )}
@@ -488,7 +532,7 @@ export default function Home() {
         <div className="h-card">
           <div className="h-card-head">
             <span className="h-card-title">STATUS</span>
-            <span className="h-card-val h-ok">ONLINE</span>
+            <span className={`h-card-val ${isOnline ? 'h-ok' : 'h-warn-soft'}`}>{isOnline ? 'ONLINE' : 'OFFLINE'}</span>
           </div>
           <div className="h-card-body">
             <div className="h-row"><span>UPTIME</span><span>{formatUptime(sys.os.uptime)}</span></div>
@@ -503,12 +547,11 @@ export default function Home() {
 
       </div>
 
-      {/* ── BLOCKCHAIN SECTION ── */}
       <div className="h-blockchain">
         <div className="h-bc-header">
           <div>
-            <h3 className="h-bc-title">BLOCKCHAIN NETWORK • END-TO-END ENCRYPTION</h3>
-            <div className="h-bc-sub">Live network monitoring • AES-256-GCM • ECDSA verified</div>
+            <h3 className="h-bc-title">BLOCKCHAIN NETWORK / END-TO-END ENCRYPTION</h3>
+            <div className="h-bc-sub">Live network monitoring / AES-256-GCM / ECDSA verified</div>
           </div>
           <div className="h-bc-stats">
             <div className="h-bc-stat"><span>ACTIVE NODES</span><span>{nodes.filter(n => n.status === 'active').length}</span></div>
@@ -564,7 +607,7 @@ export default function Home() {
                     <span>{block.transactions} tx</span>
                     <span className="h-mono">{formatHash(block.miner)}</span>
                   </div>
-                  <div className="h-block-meta">{block.size} KB • Diff {Math.floor(block.difficulty / 1e9)}B</div>
+                  <div className="h-block-meta">{block.size} KB / Diff {Math.floor(block.difficulty / 1e9)}B</div>
                 </div>
               ))}
             </div>
@@ -580,7 +623,7 @@ export default function Home() {
                     <span className={`h-tx-badge h-txb-${tx.status}`}>{tx.status}</span>
                   </div>
                   <div className="h-tx-body">
-                    <span>{formatHash(tx.from)} → {formatHash(tx.to)}</span>
+                    <span>{formatHash(tx.from)} to {formatHash(tx.to)}</span>
                     <span className="h-tx-amount">{tx.amount.toFixed(2)} ETH</span>
                   </div>
                   <div className="h-tx-meta">
@@ -621,21 +664,14 @@ export default function Home() {
         </div>
       </div>
 
-      {/* ── FOOTER ── */}
       <div className="h-footer">
-        <span>POWERED BY BLOCKCHAIN • END-TO-END ENCRYPTED • KK PROFESSIONAL</span>
+        <span>POWERED BY BLOCKCHAIN / END-TO-END ENCRYPTED / KK PROFESSIONAL</span>
       </div>
 
-      {/* Scan line */}
-      <div className="h-scan-line" />
-
-      {/* ══════════════════════════════════════════════════════
-          STYLES
-      ══════════════════════════════════════════════════════ */}
       <style>{`
         * { margin:0; padding:0; box-sizing:border-box; }
 
-        /* ── ROOT: flush below navbar, matches other pages ── */
+        /* â”€â”€ ROOT: flush below navbar, matches other pages â”€â”€ */
         .h-app {
           background: #030303;
           color: #ffffff;
@@ -643,7 +679,7 @@ export default function Home() {
           font-size: 11px;
           display: flex;
           flex-direction: column;
-          /* NO padding-top — starts flush at navbar edge */
+          /* NO padding-top â€” starts flush at navbar edge */
           padding: 0;
           gap: 1px;
           min-height: calc(100vh - 56px);
@@ -652,14 +688,14 @@ export default function Home() {
           position: relative;
         }
 
-        /* Scrollbar — same as Quiz / Poll */
+        /* Scrollbar â€” same as Quiz / Poll */
         .h-app::-webkit-scrollbar { width:4px; height:4px; }
         .h-app::-webkit-scrollbar-track { background:#111; }
         .h-app::-webkit-scrollbar-thumb { background:#222; border-radius:2px; }
         .h-app::-webkit-scrollbar-thumb:hover { background:#1e3a5f; }
         * { scrollbar-width:thin; scrollbar-color:#222 #111; }
 
-        /* ── ASCII HEADER — no top margin, starts immediately ── */
+        /* â”€â”€ ASCII HEADER â€” no top margin, starts immediately â”€â”€ */
         .h-ascii-header {
           background: #0a0a0a;
           border-bottom: 1px solid #1e3a5f;
@@ -679,9 +715,8 @@ export default function Home() {
           position: absolute;
           top: 0; left: -100%; width: 100%; height: 2px;
           background: linear-gradient(90deg, transparent, #1e3a5f, transparent);
-          animation: h-scanline 3s linear infinite;
+          opacity: 0.45;
         }
-        @keyframes h-scanline { 0%{left:-100%} 100%{left:100%} }
 
         .h-glitch {
           color: #1e3a5f;
@@ -707,7 +742,7 @@ export default function Home() {
         .h-log-msg { color: #fff; font-size: 9px; opacity: 0.7; animation: h-fade 0.3s ease; }
         @keyframes h-fade { from{opacity:0;transform:translateX(8px)} to{opacity:1;transform:translateX(0)} }
 
-        /* ── DASHBOARD GRID — tight 8-column, no outer gaps ── */
+        /* â”€â”€ DASHBOARD GRID â€” tight 8-column, no outer gaps â”€â”€ */
         .h-dashboard {
           display: grid;
           grid-template-columns: repeat(4, 1fr);
@@ -723,7 +758,7 @@ export default function Home() {
           flex-direction: column;
           gap: 7px;
           min-height: 155px;
-          transition: background 0.2s, box-shadow 0.2s;
+          transition: none;
         }
         .h-card:hover {
           background: #0d0d0d;
@@ -755,9 +790,9 @@ export default function Home() {
         .h-mono { font-family: monospace; opacity: 0.75; font-size: 8px; }
 
         .h-bar { height: 3px; background: #1a1a1a; overflow: hidden; margin-top: 3px; }
-        .h-bar-fill { height: 100%; background: #1e3a5f; transition: width 0.4s; }
+        .h-bar-fill { height: 100%; background: #1e3a5f; }
         .h-mini-bar { height: 2px; background: #1a1a1a; margin: 1px 0; }
-        .h-mini-fill { height: 100%; transition: width 0.4s; }
+        .h-mini-fill { height: 100%; }
 
         .h-sparkline {
           display: flex;
@@ -766,7 +801,7 @@ export default function Home() {
           height: 18px;
           margin-top: 3px;
         }
-        .h-spark { flex: 1; background: #1e3a5f; opacity: 0.55; transition: height 0.4s; min-height: 2px; }
+        .h-spark { flex: 1; background: #1e3a5f; opacity: 0.55; min-height: 2px; }
 
         .h-disk-item { margin-bottom: 3px; }
         .h-net-sec { margin-bottom: 6px; padding-bottom: 4px; border-bottom: 1px dotted #1e3a5f; }
@@ -788,6 +823,7 @@ export default function Home() {
         .h-proc-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .h-proc-right { display: flex; align-items: center; gap: 5px; flex-shrink: 0; }
         .h-proc-cpu { font-size: 8px; width: 30px; text-align: right; }
+        .h-proc-mem { font-size: 8px; width: 34px; text-align: right; opacity: 0.7; }
         .h-proc-bar { width: 36px; height: 2px; background: #1a1a1a; }
         .h-proc-fill { height: 100%; background: #1e3a5f; }
 
@@ -795,7 +831,7 @@ export default function Home() {
         .h-warn-soft { color: #c8964a; }
         .h-ok { color: #6dba72; }
 
-        /* ── BLOCKCHAIN SECTION ── */
+        /* â”€â”€ BLOCKCHAIN SECTION â”€â”€ */
         .h-blockchain {
           background: #0a0a0a;
           border-top: 1px solid #1e3a5f;
@@ -832,7 +868,7 @@ export default function Home() {
           padding: 12px;
           flex: 1;
           position: relative;
-          transition: background 0.2s;
+          transition: none;
           display: flex;
           flex-direction: column;
           gap: 6px;
@@ -871,18 +907,9 @@ export default function Home() {
           overflow: visible;
         }
         .h-conn-track { position: absolute; top: 50%; left: 0; right: 0; height: 1px; background: #1e3a5f; }
-        .h-packet {
-          position: absolute; top: 50%; left: 0;
-          width: 4px; height: 4px; margin-top: -2px;
-          background: #6ab4ff; border-radius: 50%;
-          animation: h-pkt 2.5s linear infinite;
-        }
+        .h-packet { display: none; }
         .h-pk-d1 { animation-delay: 0.8s; opacity: 0.7; }
         .h-pk-d2 { animation-delay: 1.6s; opacity: 0.4; }
-        @keyframes h-pkt {
-          0%   { left: 0; opacity: 1; }
-          100% { left: calc(100% + 40px); opacity: 0; }
-        }
 
         /* Bottom row: blocks + TX */
         .h-bc-bottom {
@@ -917,7 +944,7 @@ export default function Home() {
         .h-block-meta { font-size: 7px; opacity: 0.35; }
 
         .h-tx-list { display: flex; flex-direction: column; gap: 5px; }
-        .h-tx-item { background: #080808; padding: 8px 10px; border-left: 2px solid #1e3a5f; transition: background 0.15s; }
+        .h-tx-item { background: #080808; padding: 8px 10px; border-left: 2px solid #1e3a5f; transition: none; }
         .h-tx-item:hover { background: #0e0e0e; }
         .h-tx-pending  { border-left-color: #c8964a; }
         .h-tx-confirmed { border-left-color: #6ab4ff; }
@@ -937,7 +964,7 @@ export default function Home() {
         .h-expl-card {
           background: #0d0d0d;
           padding: 14px;
-          transition: background 0.2s;
+          transition: none;
         }
         .h-expl-card:hover { background: #111; }
         .h-expl-card h5 { font-size: 9px; margin-bottom: 6px; color: #6ab4ff; letter-spacing: 0.5px; }
@@ -968,15 +995,7 @@ export default function Home() {
           flex-shrink: 0;
         }
 
-        /* Scan line */
-        .h-scan-line {
-          position: fixed; top: 0; left: 0; right: 0; height: 100%;
-          background: linear-gradient(to bottom, transparent 0%, rgba(30,58,95,0.025) 50%, transparent 100%);
-          pointer-events: none;
-          animation: h-scan 8s linear infinite;
-          z-index: 999;
-        }
-        @keyframes h-scan { 0%{transform:translateY(-100%)} 100%{transform:translateY(100%)} }
+        .h-log-msg { color: #fff; font-size: 9px; opacity: 0.7; }
 
         /* Responsive */
         @media (max-width: 1400px) {
@@ -1002,3 +1021,5 @@ export default function Home() {
     </div>
   )
 }
+
+

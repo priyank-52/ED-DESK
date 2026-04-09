@@ -45,7 +45,7 @@ function App() {
   const [currentUser, setCurrentUser] = useState<User | null>(null)
   const [deviceInfo, setDeviceInfo] = useState<DeviceInfo>({
     ipAddress: '127.0.0.1',
-    bluetoothEnabled: true,
+    bluetoothEnabled: false,
     wifiEnabled: true,
     nearbyDevices: []
   })
@@ -60,7 +60,14 @@ function App() {
   }
 
   const scanNearbyDevices = () => {
-    offlineApi.scanPeers()
+    offlineApi.getPermissions()
+      .then((permissions) => {
+        if (permissions.nearbyScan !== 'granted') {
+          setDeviceInfo(prev => ({ ...prev, nearbyDevices: [] }))
+          return []
+        }
+        return offlineApi.scanPeers()
+      })
       .then((peers) => {
         setDeviceInfo(prev => ({
           ...prev,

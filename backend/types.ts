@@ -7,6 +7,17 @@ export interface PeerRecord {
   transport: 'wifi'
   capabilities: string[]
   lastSeen: number
+  hostedSession: HostedSessionSummary | null
+}
+
+export interface HostedSessionSummary {
+  code: string
+  name: string
+  description: string
+  visibility: 'public' | 'private'
+  passwordRequired: boolean
+  participantCount: number
+  updatedAt: number
 }
 
 export interface ConversationRecord {
@@ -95,4 +106,25 @@ export interface BackendStatus {
   conversations: number
   assessments: number
   recordsInLedger: number
+  activeHostedSession: HostedSessionSummary | null
+}
+
+export interface SessionRecord {
+  id: string
+  code: string
+  name: string
+  description: string
+  hostPeerId: string
+  hostDisplayName: string
+  visibility: 'public' | 'private'
+  password: string | null
+  participantPeerIds: string[]
+  createdAt: number
+  updatedAt: number
+  status: 'waiting' | 'active'
+}
+
+export interface DevicePermissions {
+  nearbyScan: 'prompt' | 'granted' | 'denied'
+  localNetwork: 'granted'
 }
