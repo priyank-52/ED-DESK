@@ -62,6 +62,8 @@ interface NetworkNode {
   status: 'connected' | 'connecting' | 'lost'
 }
 
+const ACTIVE_CHAT_STORAGE_KEY = 'eddesk-active-chat-session'
+
 const getErrorMessage = (e: unknown): string => e instanceof Error ? e.message : String(e)
 
 const inferRole = (name: string): 'teacher' | 'student' | 'admin' => {
@@ -93,6 +95,54 @@ const buildPeerSession = (
   conversationId: conv?.id ?? null,
   backendSessionId: null
 })
+
+const findConversationForSession = (
+  conversations: ConversationRecord[],
+  peerId: string,
+  sessionCode?: string | null
+) => {
+  const normalizedCode = sessionCode?.trim().toUpperCase() || null
+  return conversations.find((item) =>
+    item.peerId === peerId && (item.sessionCode ?? null) === normalizedCode
+  )
+}
+
+const saveActiveSession = (session: Session | null) => {
+  if (typeof window === 'undefined') return
+  if (!session) {
+    window.localStorage.removeItem(ACTIVE_CHAT_STORAGE_KEY)
+    return
+  }
+
+  window.localStorage.setItem(ACTIVE_CHAT_STORAGE_KEY, JSON.stringify({
+    ...session,
+    created: session.created.toISOString(),
+    lastActivity: session.lastActivity.toISOString()
+  }))
+}
+
+const loadSavedSession = (): Session | null => {
+  if (typeof window === 'undefined') return null
+
+  const raw = window.localStorage.getItem(ACTIVE_CHAT_STORAGE_KEY)
+  if (!raw) return null
+
+  try {
+    const parsed = JSON.parse(raw) as Omit<Session, 'created' | 'lastActivity'> & {
+      created: string
+      lastActivity: string
+    }
+
+    return {
+      ...parsed,
+      created: new Date(parsed.created),
+      lastActivity: new Date(parsed.lastActivity)
+    }
+  } catch {
+    window.localStorage.removeItem(ACTIVE_CHAT_STORAGE_KEY)
+    return null
+  }
+}
 
 const buildHostSession = (
   backendSession: SessionRecord,
@@ -213,6 +263,10 @@ export default function Chat() {
     return true
   }, [buildMessageSignature])
 
+  useEffect(() => {
+    saveActiveSession(currentSession)
+  }, [currentSession])
+
   // --- Load base snapshot ---
   const loadSnapshot = useCallback(async (scan = false, applyState = true) => {
     try {
@@ -235,10 +289,18 @@ export default function Chat() {
 
       const sessions = peers
         .filter(p => p.hostedSession)
-        .map(p => buildPeerSession(p, convs.find(c => c.peerId === p.id), profileData?.displayName ?? 'You'))
+        .map(p => buildPeerSession(
+          p,
+          findConversationForSession(convs, p.id, p.hostedSession?.code),
+          profileData?.displayName ?? 'You'
+        ))
 
       const allSessions = peers.map(p =>
-        buildPeerSession(p, convs.find(c => c.peerId === p.id), profileData?.displayName ?? 'You')
+        buildPeerSession(
+          p,
+          findConversationForSession(convs, p.id, p.hostedSession?.code),
+          profileData?.displayName ?? 'You'
+        )
       )
 
       if (applyState) {
@@ -365,7 +427,7 @@ export default function Chat() {
 
     // Rebuild with fresh conv id
     if (session.mode === 'peer' && snap) {
-      const freshConv = snap.convs.find(c => c.peerId === session.peerId)
+      const freshConv = findConversationForSession(snap.convs, session.peerId, session.code)
       const freshSession = { ...session, conversationId: freshConv?.id ?? null }
       setCurrentSession(freshSession)
       setParticipants([
@@ -433,7 +495,40 @@ export default function Chat() {
       if (sessionCodeParam && snap.allSessions) {
         const match = snap.allSessions.find(s => s.code === sessionCodeParam)
         if (match) await openSession(match)
+        return
       }
+
+      const savedSession = loadSavedSession()
+      if (!savedSession) return
+
+      if (savedSession.mode === 'host') {
+        const hostedSession = await offlineApi.getHostedSession().catch(() => null)
+        if (hostedSession && hostedSession.code === savedSession.code) {
+          await openSession(buildHostSession(hostedSession, snap.profile, snap.status))
+          return
+        }
+
+        saveActiveSession(null)
+        return
+      }
+
+      const savedPeer = snap.peers.find(p => p.id === savedSession.peerId)
+      const savedConv = findConversationForSession(snap.convs, savedSession.peerId, savedSession.code)
+      if (savedPeer) {
+        await openSession(buildPeerSession(savedPeer, savedConv, snap.profile?.displayName ?? 'You'))
+        return
+      }
+
+      if (savedConv) {
+        await openSession({
+          ...savedSession,
+          conversationId: savedConv.id,
+          status: 'stale'
+        })
+        return
+      }
+
+      saveActiveSession(null)
     }
     bootstrap().catch(e => console.error(e))
     return () => { mounted = false }
@@ -478,7 +573,7 @@ export default function Chat() {
             for (const pid of hosted.participantPeerIds) {
               const peer = snap.peers.find(p => p.id === pid)
               if (peer) {
-                const conv = snap.convs.find(c => c.peerId === pid)
+                const conv = findConversationForSession(snap.convs, pid, sess.code)
                 newParticipants.push({
                   id: pid,
                   name: peer.displayName,
@@ -583,7 +678,11 @@ export default function Chat() {
       if (!snap) return
       const sessions = snap.peers
         .filter(p => p.hostedSession)
-        .map(p => buildPeerSession(p, snap.convs.find(c => c.peerId === p.id), snap.profile?.displayName ?? 'You'))
+        .map(p => buildPeerSession(
+          p,
+          findConversationForSession(snap.convs, p.id, p.hostedSession?.code),
+          snap.profile?.displayName ?? 'You'
+        ))
       setNearbySessions(sessions)
       setShowJoinModal(true)
       addLog(sessions.length > 0
@@ -672,20 +771,6 @@ export default function Chat() {
 
     addLog(`Joining session ${normalizedCode}...`)
 
-    // First try direct peer match (peer already known, has conversation)
-    const snap = await loadSnapshot(false)
-    if (!snap) return
-
-    const directPeer = snap.peers.find(p => p.hostedSession?.code === normalizedCode)
-    if (directPeer) {
-      const conv = snap.convs.find(c => c.peerId === directPeer.id)
-      const session = buildPeerSession(directPeer, conv, snap.profile?.displayName ?? 'You')
-      await openSession(session)
-      setShowJoinModal(false)
-      return
-    }
-
-    // Use real joinSessionByCode — makes HTTP POST to peer
     try {
       const backendSession = await offlineApi.joinSessionByCode(normalizedCode, password)
       // After joining, refresh to get peer + conversation
@@ -694,7 +779,7 @@ export default function Chat() {
 
       const peer = freshSnap.peers.find(p => p.id === backendSession.hostPeerId)
       if (peer) {
-        const conv = freshSnap.convs.find(c => c.peerId === peer.id)
+        const conv = findConversationForSession(freshSnap.convs, peer.id, normalizedCode)
         const session = buildPeerSession(peer, conv, freshSnap.profile?.displayName ?? 'You')
         await openSession(session)
       } else {
@@ -714,7 +799,7 @@ export default function Chat() {
           address: '',
           transport: 'wifi',
           status: 'online',
-          conversationId: freshSnap.convs.find(c => c.peerId === backendSession.hostPeerId)?.id ?? null,
+          conversationId: findConversationForSession(freshSnap.convs, backendSession.hostPeerId, normalizedCode)?.id ?? null,
           backendSessionId: backendSession.id
         }
         await openSession(minimalSession)
@@ -743,6 +828,7 @@ export default function Chat() {
     setParticipants([])
     setSelectedTab('messages')
     setBroadcastMode(false)
+    saveActiveSession(null)
     navigate('/chat', { replace: true })
     await loadSnapshot(false)
   }, [addLog, currentSession, loadSnapshot, navigate])
@@ -772,7 +858,7 @@ export default function Chat() {
       try {
         const snap = await loadSnapshot(false)
         const peers = snap?.peers.filter(p => hosted.participantPeerIds.includes(p.id)) ?? []
-        await Promise.allSettled(peers.map(p => offlineApi.sendMessage(p.id, content)))
+        await Promise.allSettled(peers.map(p => offlineApi.sendMessage(p.id, content, currentSession.code)))
         addLog(`Broadcast sent to ${peers.length} participant(s)`)
         // Optimistic add
         setMessages(prev => [...prev, {
@@ -812,10 +898,10 @@ export default function Chat() {
 
     try {
       if (broadcastMode) {
-        await Promise.allSettled(peerRecords.filter(p => p.status === 'online').map(p => offlineApi.sendMessage(p.id, content)))
+        await Promise.allSettled(peerRecords.filter(p => p.status === 'online').map(p => offlineApi.sendMessage(p.id, content, currentSession.code)))
         addLog(`Broadcast sent`)
       } else {
-        await offlineApi.sendMessage(currentSession.peerId, content)
+        await offlineApi.sendMessage(currentSession.peerId, content, currentSession.code)
         addLog(`Message sent to ${currentSession.name.replace(/^Chat · /, '')}`)
       }
       setMessages(prev => prev.map(m => m.id === optimisticId ? { ...m, delivered: true } : m))

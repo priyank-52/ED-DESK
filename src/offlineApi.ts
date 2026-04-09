@@ -24,6 +24,7 @@ export interface ConversationRecord {
   id: string
   peerId: string
   peerName: string
+  sessionCode: string | null
   lastMessage: string
   updatedAt: number
   unreadCount: number
@@ -149,7 +150,7 @@ export const offlineApi = {
   joinSessionByCode: (code: string, password?: string) => window.electronAPI.offline.joinSessionByCode(code, password) as Promise<SessionRecord>,
   listConversations: () => window.electronAPI.offline.listConversations() as Promise<ConversationRecord[]>,
   getMessages: (conversationId: string) => window.electronAPI.offline.getMessages(conversationId) as Promise<ChatMessageRecord[]>,
-  sendMessage: (peerId: string, content: string) => window.electronAPI.offline.sendMessage(peerId, content) as Promise<ChatMessageRecord>,
+  sendMessage: (peerId: string, content: string, sessionCode?: string) => window.electronAPI.offline.sendMessage(peerId, content, sessionCode) as Promise<ChatMessageRecord>,
   listAssessments: () => window.electronAPI.offline.listAssessments() as Promise<AssessmentRecord[]>,
   createAssessment: (payload: {
     title: string

@@ -566,9 +566,9 @@ app.whenReady().then(async () => {
   ipcMain.handle('offline:get-messages', (_event, conversationId: string) => {
     return backendService?.getMessages(conversationId) ?? []
   })
-  ipcMain.handle('offline:send-message', async (_event, peerId: string, content: string) => {
+  ipcMain.handle('offline:send-message', async (_event, peerId: string, content: string, sessionCode?: string) => {
     if (!backendService) throw new Error('Offline backend is not running.')
-    return await backendService.sendLanMessage(peerId, content)
+    return await backendService.sendLanMessage(peerId, content, sessionCode)
   })
   ipcMain.handle('offline:list-assessments', () => backendService?.listAssessments() ?? [])
   ipcMain.handle('offline:create-assessment', async (_event, payload) => {

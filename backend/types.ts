@@ -24,6 +24,7 @@ export interface ConversationRecord {
   id: string
   peerId: string
   peerName: string
+  sessionCode: string | null
   lastMessage: string
   updatedAt: number
   unreadCount: number

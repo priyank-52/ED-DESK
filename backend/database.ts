@@ -92,14 +92,18 @@ export class BackendDatabase {
     return this.peers.get(peerId)
   }
 
-  ensureConversation(peerId: string, peerName: string): ConversationRecord {
-    const existing = [...this.conversations.values()].find((item) => item.peerId === peerId)
+  ensureConversation(peerId: string, peerName: string, sessionCode?: string | null): ConversationRecord {
+    const normalizedSessionCode = sessionCode?.trim().toUpperCase() || null
+    const existing = [...this.conversations.values()].find((item) =>
+      item.peerId === peerId && (item.sessionCode ?? null) === normalizedSessionCode
+    )
     if (existing) return existing
 
     const conversation: ConversationRecord = {
-      id: `conversation-${peerId}`,
+      id: normalizedSessionCode ? `conversation-${peerId}-${normalizedSessionCode}` : `conversation-${peerId}`,
       peerId,
       peerName,
+      sessionCode: normalizedSessionCode,
       lastMessage: '',
       updatedAt: Date.now(),
       unreadCount: 0

@@ -34,6 +34,7 @@ interface PeerMessagePayload {
   recipientName: string
   content: string
   timestamp: number
+  sessionCode?: string
 }
 
 interface JoinSessionPayload {
@@ -441,7 +442,7 @@ export class OfflineBackendService {
       password
     } satisfies JoinSessionPayload)
 
-    this.database.ensureConversation(peer.id, peer.displayName)
+    this.database.ensureConversation(peer.id, peer.displayName, normalizedCode)
     this.database.addLedgerRecord({
       entityType: 'message',
       entityId: response.session.id,
@@ -495,13 +496,14 @@ export class OfflineBackendService {
     return this.database.listMessages(conversationId)
   }
 
-  async sendLanMessage(peerId: string, content: string): Promise<ChatMessageRecord> {
+  async sendLanMessage(peerId: string, content: string, sessionCode?: string): Promise<ChatMessageRecord> {
     const peer = this.database.getPeer(peerId)
     if (!peer) {
       throw new Error('Peer is not available on the local network.')
     }
 
-    const conversation = this.database.ensureConversation(peer.id, peer.displayName)
+    const normalizedSessionCode = sessionCode?.trim().toUpperCase() || null
+    const conversation = this.database.ensureConversation(peer.id, peer.displayName, normalizedSessionCode)
     const createdAt = Date.now()
     const pendingMessage = this.database.addMessage({
       id: `msg-${randomUUID()}`,
@@ -533,7 +535,8 @@ export class OfflineBackendService {
         peerName: this.displayName,
         recipientName: peer.displayName,
         content,
-        timestamp: createdAt
+        timestamp: createdAt,
+        sessionCode: normalizedSessionCode ?? undefined
       } satisfies PeerMessagePayload)
 
       const deliveredAt = Date.now()
@@ -562,7 +565,7 @@ export class OfflineBackendService {
       hostedSession: null
     }
 
-    const conversation = this.database.ensureConversation(peer.id, payload.peerName)
+    const conversation = this.database.ensureConversation(peer.id, payload.peerName, payload.sessionCode)
     const message = this.database.addMessage({
       id: `msg-${randomUUID()}`,
       conversationId: conversation.id,
