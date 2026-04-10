@@ -808,6 +808,11 @@ export class OfflineBackendService {
     })
   }
 
+  private isReachabilityError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error)
+    return /ETIMEDOUT|ECONNREFUSED|EHOSTUNREACH|ENETUNREACH|Request timed out|Timeout/i.test(message)
+  }
+
   getAttachment(attachmentId: string): AttachmentRecord | undefined {
     return this.database.getAttachment(attachmentId)
   }
@@ -828,11 +833,11 @@ export class OfflineBackendService {
       data: string // base64
     }
   ): Promise<ChatMessageRecord> {
-    const peer = this.database.getPeer(peerId)
-    if (!peer) throw new Error('Peer is not available on the local network.')
+    const initialPeer = this.database.getPeer(peerId)
+    if (!initialPeer) throw new Error('Peer is not available on the local network.')
 
     const normalizedSessionCode = sessionCode?.trim().toUpperCase() || null
-    const conversation = this.database.ensureConversation(peer.id, peer.displayName, normalizedSessionCode)
+    const conversation = this.database.ensureConversation(initialPeer.id, initialPeer.displayName, normalizedSessionCode)
     const createdAt = Date.now()
     const messageId = `msg-${randomUUID()}`
 
@@ -843,7 +848,7 @@ export class OfflineBackendService {
         id: `att-${randomUUID()}`,
         messageId,
         conversationId: conversation.id,
-        peerId: peer.id,
+        peerId,
         type: attachment.type,
         name: attachment.name,
         size: attachment.size,
@@ -857,10 +862,10 @@ export class OfflineBackendService {
     const pendingMessage = this.database.addMessage({
       id: messageId,
       conversationId: conversation.id,
-      peerId: peer.id,
-      peerName: peer.displayName,
+      peerId,
+      peerName: initialPeer.displayName,
       senderName: this.displayName,
-      recipientName: peer.displayName,
+      recipientName: initialPeer.displayName,
       content: attachment ? '' : content,
       direction: 'outgoing',
       transport: 'wifi',
@@ -881,36 +886,56 @@ export class OfflineBackendService {
     })
 
     try {
-      const payload: PeerMessagePayload = {
+      const buildPayload = (): PeerMessagePayload => ({
         peerId: this.peerId,
         peerName: this.displayName,
-        recipientName: peer.displayName,
+        recipientName: (this.database.getPeer(peerId)?.displayName ?? initialPeer.displayName),
         content: attachment ? '' : content,
         timestamp: createdAt,
         serverPort: this.serverPort,
         sessionCode: normalizedSessionCode ?? undefined
-      }
+      })
 
-      if (attachmentRecord) {
+      const applyAttachment = (payload: PeerMessagePayload): PeerMessagePayload => {
+        if (!attachmentRecord) return payload
         payload.attachmentId = attachmentRecord.id
         payload.attachmentType = attachmentRecord.type
         payload.attachmentName = attachmentRecord.name
         payload.attachmentSize = attachmentRecord.size
         payload.attachmentMime = attachmentRecord.mime
-        payload.attachmentData = attachmentRecord.data // inline for LAN transfer
+        payload.attachmentData = attachmentRecord.data
+        return payload
       }
 
       const timeoutMs = attachmentRecord
         ? Math.min(45000, Math.max(15000, Math.ceil(Buffer.byteLength(attachmentRecord.data) / 250000) * 1000))
         : 7000
 
-      await this.postJson(peer, '/api/peer/message', payload, { timeoutMs })
+      let targetPeer = this.database.getPeer(peerId) ?? initialPeer
+
+      try {
+        await this.postJson(targetPeer, '/api/peer/message', applyAttachment(buildPayload()), { timeoutMs })
+      } catch (error) {
+        if (!this.isReachabilityError(error)) throw error
+
+        const refreshedPeer =
+          (normalizedSessionCode ? await this.waitForPeerBySessionCode(normalizedSessionCode, 2000) : null) ??
+          this.database.getPeer(peerId)
+
+        if (!refreshedPeer) throw error
+        targetPeer = refreshedPeer
+        await this.postJson(targetPeer, '/api/peer/message', applyAttachment(buildPayload()), { timeoutMs })
+      }
 
       const deliveredAt = Date.now()
       this.database.updateMessageStatus(pendingMessage.id, 'delivered', deliveredAt)
       return { ...pendingMessage, status: 'delivered', deliveredAt }
     } catch (error) {
       this.database.updateMessageStatus(pendingMessage.id, 'failed')
+      const latestPeer = this.database.getPeer(peerId)
+      if (latestPeer && this.isReachabilityError(error)) {
+        this.database.upsertPeer({ ...latestPeer, status: 'stale', hostedSession: latestPeer.hostedSession ?? null })
+      }
       throw error
     }
   }
