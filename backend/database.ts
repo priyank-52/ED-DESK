@@ -331,6 +331,14 @@ export class BackendDatabase {
     return this.permissions
   }
 
+  getOrCreateDeviceId(): string {
+    const existing = this.readSetting<string>('deviceId')
+    if (existing?.trim()) return existing
+    const created = `peer-${randomUUID()}`
+    this.writeSetting('deviceId', created)
+    return created
+  }
+
   updatePermissions(partial: Partial<DevicePermissions>): DevicePermissions {
     const nextPermissions = { ...this.permissions, ...partial }
     if (JSON.stringify(nextPermissions) === JSON.stringify(this.permissions)) {
@@ -580,6 +588,14 @@ export class BackendDatabase {
     } catch {
       return null
     }
+  }
+
+  private writeSetting(key: string, value: unknown): void {
+    this.db().run(
+      'INSERT OR REPLACE INTO settings (key, data) VALUES (?, ?)',
+      [key, JSON.stringify(value)]
+    )
+    fs.writeFileSync(this.dbPath, Buffer.from(this.db().export()))
   }
 
   private persist(): void {

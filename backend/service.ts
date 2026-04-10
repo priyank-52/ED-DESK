@@ -74,7 +74,7 @@ export class OfflineBackendService {
   private readonly discoveryPort = 41235
   private readonly preferredServerPorts = [41236, 41237, 41238, 41239, 41240]
   private readonly database: BackendDatabase
-  private readonly peerId: string
+  private peerId = ''
   private readonly displayName: string
   private server: http.Server | null = null
   private discoverySocket: dgram.Socket | null = null
@@ -87,12 +87,12 @@ export class OfflineBackendService {
     this.database = new BackendDatabase(
       join(app.getPath('userData'), 'backend', 'eddesk.sqlite')
     )
-    this.peerId = `peer-${os.hostname().toLowerCase()}`
     this.displayName = os.hostname()
   }
 
   async start(): Promise<void> {
     await this.database.init()
+    this.peerId = this.database.getOrCreateDeviceId()
     await this.startHttpServer()
     await this.startDiscovery()
     this.broadcastHeartbeat()
