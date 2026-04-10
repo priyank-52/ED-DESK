@@ -9,6 +9,7 @@ import type {
   AssessmentQuestion,
   AssessmentRecord,
   AssessmentSubmissionRecord,
+  AttachmentRecord,
   BackendStatus,
   ChatMessageRecord,
   ConversationRecord,
@@ -44,6 +45,14 @@ interface PeerMessagePayload {
   timestamp: number
   serverPort: number
   sessionCode?: string
+  // Attachment metadata (data transferred separately via HTTP)
+  attachmentId?: string
+  attachmentType?: AttachmentRecord['type']
+  attachmentName?: string
+  attachmentSize?: number
+  attachmentMime?: string
+  // For small attachments, data is inlined; for larger ones a separate /api/peer/attachment/:id endpoint is used
+  attachmentData?: string
 }
 
 interface JoinSessionPayload {
@@ -52,6 +61,13 @@ interface JoinSessionPayload {
   code: string
   serverPort: number
   password?: string
+}
+
+// System message prefix – these are never stored in DB
+const SYS_PREFIX = '__SYS__:'
+
+function isSysMessage(content: string): boolean {
+  return content.startsWith(SYS_PREFIX)
 }
 
 export class OfflineBackendService {
@@ -68,7 +84,9 @@ export class OfflineBackendService {
   private peerExpiryTimer: NodeJS.Timeout | null = null
 
   constructor() {
-    this.database = new BackendDatabase(join(app.getPath('userData'), 'backend', 'eddesk.sqlite'))
+    this.database = new BackendDatabase(
+      join(app.getPath('userData'), 'backend', 'eddesk.sqlite')
+    )
     this.peerId = `peer-${os.hostname().toLowerCase()}`
     this.displayName = os.hostname()
   }
@@ -91,17 +109,15 @@ export class OfflineBackendService {
     if (this.server) {
       await new Promise<void>((resolve, reject) => {
         this.server?.close((error) => {
-          if (error) {
-            reject(error)
-            return
-          }
+          if (error) { reject(error); return }
           resolve()
         })
       })
     }
-
     this.server = null
   }
+
+  // ── HTTP server ────────────────────────────────────────────────────────────
 
   private async startHttpServer(): Promise<void> {
     this.server = http.createServer(async (request, response) => {
@@ -115,6 +131,11 @@ export class OfflineBackendService {
 
         if (request.method === 'POST' && url.pathname === '/api/peer/message') {
           const payload = await this.readJson<PeerMessagePayload>(request)
+          // Silently discard system messages – do not persist
+          if (isSysMessage(payload.content)) {
+            this.writeJson(response, 200, { ok: true })
+            return
+          }
           const message = this.receivePeerMessage(payload, request.socket.remoteAddress)
           this.writeJson(response, 200, { ok: true, message })
           return
@@ -141,6 +162,24 @@ export class OfflineBackendService {
           return
         }
 
+        if (request.method === 'POST' && url.pathname === '/api/peer/attachment') {
+          const payload = await this.readJson<{
+            attachment: AttachmentRecord
+            conversationId: string
+          }>(request)
+          this.database.saveAttachment(payload.attachment)
+          this.writeJson(response, 200, { ok: true })
+          return
+        }
+
+        if (request.method === 'GET' && url.pathname.startsWith('/api/peer/attachment/')) {
+          const attachmentId = url.pathname.slice('/api/peer/attachment/'.length)
+          const att = this.database.getAttachment(attachmentId)
+          if (!att) { this.writeJson(response, 404, { error: 'Not found' }); return }
+          this.writeJson(response, 200, { ok: true, attachment: att })
+          return
+        }
+
         this.writeJson(response, 404, { error: 'Not found' })
       } catch (error) {
         this.writeJson(response, 400, {
@@ -154,7 +193,6 @@ export class OfflineBackendService {
 
   private async listenOnPreferredPort(): Promise<void> {
     let lastError: unknown = null
-
     for (const port of this.preferredServerPorts) {
       try {
         await new Promise<void>((resolve, reject) => {
@@ -162,7 +200,6 @@ export class OfflineBackendService {
             this.server?.off('error', onError)
             reject(error)
           }
-
           this.server?.once('error', onError)
           this.server?.listen(port, '0.0.0.0', () => {
             this.server?.off('error', onError)
@@ -171,7 +208,6 @@ export class OfflineBackendService {
               reject(new Error('Unable to bind local backend server'))
               return
             }
-
             this.serverPort = addressInfo.port
             this.localAddress = this.getLocalIpAddress()
             resolve()
@@ -182,9 +218,10 @@ export class OfflineBackendService {
         lastError = error
       }
     }
-
     throw lastError instanceof Error ? lastError : new Error('Unable to bind LAN backend server')
   }
+
+  // ── UDP discovery ──────────────────────────────────────────────────────────
 
   private async startDiscovery(): Promise<void> {
     this.discoverySocket = dgram.createSocket({ type: 'udp4', reuseAddr: true })
@@ -192,9 +229,7 @@ export class OfflineBackendService {
     this.discoverySocket.on('message', (buffer, remote) => {
       try {
         const payload = JSON.parse(buffer.toString()) as PeerHeartbeat | DiscoveryProbe
-        if (payload.app !== 'ed-desk' || payload.peerId === this.peerId) {
-          return
-        }
+        if (payload.app !== 'ed-desk' || payload.peerId === this.peerId) return
 
         if (payload.type === 'probe') {
           this.broadcastHeartbeat(remote.address)
@@ -213,7 +248,7 @@ export class OfflineBackendService {
           hostedSession: payload.hostedSession
         })
       } catch {
-        // Ignore invalid datagrams.
+        // Ignore invalid datagrams
       }
     })
 
@@ -233,16 +268,11 @@ export class OfflineBackendService {
   private expirePeers(): void {
     const peers = this.database.listPeers()
     const now = Date.now()
-
     for (const peer of peers) {
       const status: PeerRecord['status'] = now - peer.lastSeen > 30000 ? 'stale' : 'online'
       const hostedSession = status === 'stale' ? null : peer.hostedSession
       if (status !== peer.status || hostedSession !== peer.hostedSession) {
-        this.database.upsertPeer({
-          ...peer,
-          status,
-          hostedSession
-        })
+        this.database.upsertPeer({ ...peer, status, hostedSession })
       }
     }
   }
@@ -268,39 +298,34 @@ export class OfflineBackendService {
       peerId: this.peerId,
       displayName: this.displayName,
       port: this.serverPort,
-      capabilities: ['chat', 'assessment', 'ledger'],
+      capabilities: ['chat', 'assessment', 'ledger', 'file-transfer'],
       hostedSession: this.currentHostedSessionSummary(),
       timestamp: Date.now()
     }
-
     const message = Buffer.from(JSON.stringify(payload))
     const targets = targetAddress ? [targetAddress] : this.getDiscoveryBroadcastAddresses()
     for (const address of targets) {
-      this.discoverySocket?.send(message, this.discoveryPort, address, () => {
-        // Best-effort LAN discovery; ignore per-target send errors.
-      })
+      this.discoverySocket?.send(message, this.discoveryPort, address, () => {})
     }
   }
 
   private sendDiscoveryProbe(): void {
-    const message = Buffer.from(JSON.stringify({
-      type: 'probe',
-      app: 'ed-desk',
-      peerId: this.peerId,
-      timestamp: Date.now()
-    } satisfies DiscoveryProbe))
-
+    const message = Buffer.from(
+      JSON.stringify({
+        type: 'probe',
+        app: 'ed-desk',
+        peerId: this.peerId,
+        timestamp: Date.now()
+      } satisfies DiscoveryProbe)
+    )
     for (const address of this.getDiscoveryBroadcastAddresses()) {
-      this.discoverySocket?.send(message, this.discoveryPort, address, () => {
-        // Best-effort LAN discovery; ignore per-target send errors.
-      })
+      this.discoverySocket?.send(message, this.discoveryPort, address, () => {})
     }
   }
 
   private getDiscoveryBroadcastAddresses(): string[] {
     const addresses = new Set<string>(['255.255.255.255'])
     const interfaces = os.networkInterfaces()
-
     for (const addrs of Object.values(interfaces)) {
       for (const addr of addrs ?? []) {
         if (addr.family !== 'IPv4' || addr.internal || !addr.netmask) continue
@@ -308,7 +333,6 @@ export class OfflineBackendService {
         if (broadcast) addresses.add(broadcast)
       }
     }
-
     return [...addresses]
   }
 
@@ -316,21 +340,21 @@ export class OfflineBackendService {
     const ipInt = this.ipv4ToInt(ip)
     const maskInt = this.ipv4ToInt(netmask)
     if (ipInt == null || maskInt == null) return null
-
     const broadcast = (ipInt | (~maskInt >>> 0)) >>> 0
     return this.intToIpv4(broadcast)
   }
 
   private ipv4ToInt(ip: string): number | null {
-    const parts = ip.split('.').map((part) => Number(part))
-    if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
+    const parts = ip.split('.').map(Number)
+    if (parts.length !== 4 || parts.some((p) => !Number.isInteger(p) || p < 0 || p > 255))
       return null
-    }
-
-    return (((parts[0] << 24) >>> 0) |
-      ((parts[1] << 16) >>> 0) |
-      ((parts[2] << 8) >>> 0) |
-      (parts[3] >>> 0)) >>> 0
+    return (
+      (((parts[0] << 24) >>> 0) |
+        ((parts[1] << 16) >>> 0) |
+        ((parts[2] << 8) >>> 0) |
+        (parts[3] >>> 0)) >>>
+      0
+    )
   }
 
   private intToIpv4(value: number): string {
@@ -342,30 +366,86 @@ export class OfflineBackendService {
     ].join('.')
   }
 
-  private async waitForPeerBySessionCode(code: string, timeoutMs = 3000): Promise<PeerRecord | null> {
-    const startedAt = Date.now()
+  // ── Session discovery ──────────────────────────────────────────────────────
 
+  private async waitForPeerBySessionCode(
+    code: string,
+    timeoutMs = 3000
+  ): Promise<PeerRecord | null> {
+    const startedAt = Date.now()
     while (Date.now() - startedAt < timeoutMs) {
-      const peer = this.listPeers().find((item) => item.status === 'online' && item.hostedSession?.code === code)
+      const peer = this.listPeers().find(
+        (item) => item.status === 'online' && item.hostedSession?.code === code
+      )
       if (peer?.hostedSession) return peer
       this.sendDiscoveryProbe()
       this.broadcastHeartbeat()
       await new Promise((resolve) => setTimeout(resolve, 350))
     }
-
-    return this.listPeers().find((item) => item.status === 'online' && item.hostedSession?.code === code)
-      ?? await this.probeLanForSession(code)
+    return (
+      this.listPeers().find(
+        (item) => item.status === 'online' && item.hostedSession?.code === code
+      ) ?? (await this.probeLanForSession(code))
+    )
   }
+
+  // Parallel LAN scan with concurrency limit
+  private async probeLanForSession(code: string): Promise<PeerRecord | null> {
+    const candidates = this.listLanCandidates()
+    const CONCURRENCY = 20
+    let foundPeer: PeerRecord | null = null
+
+    const tasks = candidates.flatMap((host) =>
+      this.preferredServerPorts.map((port) => async () => {
+        if (foundPeer) return
+        try {
+          const status = await this.getJson<BackendStatus>(host, port, '/api/status')
+          if (status.peerId === this.peerId || status.activeHostedSession?.code !== code) return
+          const peer: PeerRecord = {
+            id: status.peerId,
+            displayName: status.displayName,
+            address: host,
+            port: status.serverPort,
+            status: 'online',
+            transport: 'wifi',
+            capabilities: ['chat', 'assessment', 'ledger', 'file-transfer'],
+            lastSeen: Date.now(),
+            hostedSession: status.activeHostedSession
+          }
+          this.database.upsertPeer(peer)
+          foundPeer = peer
+        } catch {
+          // Ignore unreachable hosts
+        }
+      })
+    )
+
+    // Run with concurrency limit
+    let idx = 0
+    const runNext = async (): Promise<void> => {
+      while (idx < tasks.length && !foundPeer) {
+        const task = tasks[idx++]
+        await task()
+      }
+    }
+    const workers = Array.from({ length: CONCURRENCY }, () => runNext())
+    await Promise.all(workers)
+    return foundPeer
+  }
+
+  // ── HTTP helpers ───────────────────────────────────────────────────────────
 
   private async readJson<T>(request: IncomingMessage): Promise<T> {
     const chunks: Buffer[] = []
-    for await (const chunk of request) {
-      chunks.push(Buffer.from(chunk))
-    }
+    for await (const chunk of request) chunks.push(Buffer.from(chunk))
     return JSON.parse(Buffer.concat(chunks).toString()) as T
   }
 
-  private writeJson(response: http.ServerResponse, statusCode: number, payload: unknown): void {
+  private writeJson(
+    response: http.ServerResponse,
+    statusCode: number,
+    payload: unknown
+  ): void {
     response.statusCode = statusCode
     response.setHeader('Content-Type', 'application/json')
     response.end(JSON.stringify(payload))
@@ -379,27 +459,23 @@ export class OfflineBackendService {
           port: peer.port,
           path,
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          timeout: 3000
+          headers: { 'Content-Type': 'application/json' },
+          timeout: 5000
         },
         async (response) => {
           const chunks: Buffer[] = []
-          for await (const chunk of response) {
-            chunks.push(Buffer.from(chunk))
-          }
+          for await (const chunk of response) chunks.push(Buffer.from(chunk))
           const raw = Buffer.concat(chunks).toString()
           if (response.statusCode && response.statusCode >= 400) {
-            const error = raw ? JSON.parse(raw) as { error?: string } : {}
+            const error = raw ? (JSON.parse(raw) as { error?: string }) : {}
             reject(new Error(error.error ?? `Request failed with status ${response.statusCode}`))
             return
           }
           resolve(JSON.parse(raw) as T)
         }
       )
-
       request.on('error', reject)
+      request.on('timeout', () => { request.destroy(); reject(new Error('Request timed out')) })
       request.write(JSON.stringify(payload))
       request.end()
     })
@@ -408,18 +484,10 @@ export class OfflineBackendService {
   private async getJson<T>(host: string, port: number, path: string): Promise<T> {
     return await new Promise<T>((resolve, reject) => {
       const request = http.request(
-        {
-          host,
-          port,
-          path,
-          method: 'GET',
-          timeout: 1200
-        },
+        { host, port, path, method: 'GET', timeout: 1200 },
         async (response) => {
           const chunks: Buffer[] = []
-          for await (const chunk of response) {
-            chunks.push(Buffer.from(chunk))
-          }
+          for await (const chunk of response) chunks.push(Buffer.from(chunk))
           const raw = Buffer.concat(chunks).toString()
           if (response.statusCode && response.statusCode >= 400) {
             reject(new Error(`Request failed with status ${response.statusCode}`))
@@ -428,22 +496,21 @@ export class OfflineBackendService {
           resolve(JSON.parse(raw) as T)
         }
       )
-
       request.on('error', reject)
+      request.on('timeout', () => { request.destroy(); reject(new Error('Timeout')) })
       request.end()
     })
   }
+
+  // ── Network helpers ────────────────────────────────────────────────────────
 
   private getLocalIpAddress(): string {
     const interfaces = os.networkInterfaces()
     for (const addrs of Object.values(interfaces)) {
       for (const addr of addrs ?? []) {
-        if (addr.family === 'IPv4' && !addr.internal) {
-          return addr.address
-        }
+        if (addr.family === 'IPv4' && !addr.internal) return addr.address
       }
     }
-
     return '127.0.0.1'
   }
 
@@ -454,51 +521,20 @@ export class OfflineBackendService {
 
   private listLanCandidates(): string[] {
     const candidates = new Set<string>()
+    // Add already-known peers first (higher chance of success)
+    for (const peer of this.listPeers()) {
+      if (peer.address && peer.address !== this.localAddress) candidates.add(peer.address)
+    }
+    // Then sweep the subnet
     const localParts = this.localAddress.split('.')
     if (localParts.length === 4) {
       const prefix = localParts.slice(0, 3).join('.')
-      for (let i = 1; i < 255; i += 1) {
+      for (let i = 1; i < 255; i++) {
         const candidate = `${prefix}.${i}`
         if (candidate !== this.localAddress) candidates.add(candidate)
       }
     }
-
-    for (const peer of this.listPeers()) {
-      if (peer.address && peer.address !== this.localAddress) {
-        candidates.add(peer.address)
-      }
-    }
-
     return [...candidates]
-  }
-
-  private async probeLanForSession(code: string): Promise<PeerRecord | null> {
-    for (const host of this.listLanCandidates()) {
-      for (const port of this.preferredServerPorts) {
-        try {
-          const status = await this.getJson<BackendStatus>(host, port, '/api/status')
-          if (status.peerId === this.peerId || status.activeHostedSession?.code !== code) continue
-
-          const peer: PeerRecord = {
-            id: status.peerId,
-            displayName: status.displayName,
-            address: host,
-            port: status.serverPort,
-            status: 'online',
-            transport: 'wifi',
-            capabilities: ['chat', 'assessment', 'ledger'],
-            lastSeen: Date.now(),
-            hostedSession: status.activeHostedSession
-          }
-          this.database.upsertPeer(peer)
-          return peer
-        } catch {
-          // Ignore unreachable candidates during LAN fallback probing.
-        }
-      }
-    }
-
-    return null
   }
 
   private upsertPeerConnection(
@@ -515,11 +551,13 @@ export class OfflineBackendService {
       port: serverPort || existing?.port || 0,
       status: 'online',
       transport: 'wifi',
-      capabilities: existing?.capabilities ?? ['chat', 'assessment', 'ledger'],
+      capabilities: existing?.capabilities ?? ['chat', 'assessment', 'ledger', 'file-transfer'],
       lastSeen: Date.now(),
       hostedSession: existing?.hostedSession ?? null
     })
   }
+
+  // ── Public API ─────────────────────────────────────────────────────────────
 
   getStatus(): BackendStatus {
     return {
@@ -532,7 +570,7 @@ export class OfflineBackendService {
       blockchainMode: 'hash-ledger',
       bluetoothSupported: false,
       wifiDiscoveryEnabled: true,
-      peersOnline: this.listPeers().filter((peer) => peer.status === 'online').length,
+      peersOnline: this.listPeers().filter((p) => p.status === 'online').length,
       conversations: this.listConversations().length,
       assessments: this.listAssessments().length,
       recordsInLedger: this.listLedger().length,
@@ -541,10 +579,7 @@ export class OfflineBackendService {
   }
 
   getProfile(): { peerId: string; displayName: string } {
-    return {
-      peerId: this.peerId,
-      displayName: this.displayName
-    }
+    return { peerId: this.peerId, displayName: this.displayName }
   }
 
   getPermissions(): DevicePermissions {
@@ -600,8 +635,8 @@ export class OfflineBackendService {
     visibility: 'public' | 'private'
     password?: string
   }): SessionRecord {
-    const normalizedCode = (input.code?.trim().toUpperCase() || this.generateSessionCode())
-    const password = input.visibility === 'private' ? input.password?.trim() || null : null
+    const normalizedCode = input.code?.trim().toUpperCase() || this.generateSessionCode()
+    const password = input.visibility === 'private' ? (input.password?.trim() || null) : null
     const now = Date.now()
     const session: SessionRecord = {
       id: `session-${this.peerId}`,
@@ -622,10 +657,7 @@ export class OfflineBackendService {
       entityType: 'message',
       entityId: session.id,
       action: 'session-create',
-      payload: {
-        code: session.code,
-        visibility: session.visibility
-      }
+      payload: { code: session.code, visibility: session.visibility }
     })
     this.broadcastHeartbeat()
     return session
@@ -638,9 +670,7 @@ export class OfflineBackendService {
         entityType: 'message',
         entityId: hosted.id,
         action: 'session-close',
-        payload: {
-          code: hosted.code
-        }
+        payload: { code: hosted.code }
       })
     }
     this.database.saveHostedSession(null)
@@ -649,10 +679,15 @@ export class OfflineBackendService {
 
   async joinSessionByCode(code: string, password?: string): Promise<SessionRecord> {
     const normalizedCode = code.trim().toUpperCase()
-    const findLivePeer = () => this.listPeers().find((peer) => peer.status === 'online' && peer.hostedSession?.code === normalizedCode)
-    const stalePeer = this.listPeers().find((peer) => peer.hostedSession?.code === normalizedCode)
+    const findLivePeer = () =>
+      this.listPeers().find(
+        (peer) => peer.status === 'online' && peer.hostedSession?.code === normalizedCode
+      )
+    const stalePeer = this.listPeers().find(
+      (peer) => peer.hostedSession?.code === normalizedCode
+    )
     const directMatch = findLivePeer()
-    const peer = directMatch ?? await this.waitForPeerBySessionCode(normalizedCode)
+    const peer = directMatch ?? (await this.waitForPeerBySessionCode(normalizedCode))
 
     if (!peer || !peer.hostedSession) {
       if (stalePeer) {
@@ -663,21 +698,21 @@ export class OfflineBackendService {
 
     let response: { ok: true; session: SessionRecord }
     try {
-      response = await this.postJson<{ ok: true; session: SessionRecord }>(peer, '/api/peer/session/join', {
-        peerId: this.peerId,
-        peerName: this.displayName,
-        code: normalizedCode,
-        serverPort: this.serverPort,
-        password
-      } satisfies JoinSessionPayload)
+      response = await this.postJson<{ ok: true; session: SessionRecord }>(
+        peer,
+        '/api/peer/session/join',
+        {
+          peerId: this.peerId,
+          peerName: this.displayName,
+          code: normalizedCode,
+          serverPort: this.serverPort,
+          password
+        } satisfies JoinSessionPayload
+      )
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       if (/ETIMEDOUT|ECONNREFUSED|EHOSTUNREACH|ENETUNREACH/i.test(message)) {
-        this.database.upsertPeer({
-          ...peer,
-          status: 'stale',
-          hostedSession: null
-        })
+        this.database.upsertPeer({ ...peer, status: 'stale', hostedSession: null })
         throw new Error(`Session code ${normalizedCode} is offline or unreachable right now.`)
       }
       throw error
@@ -688,15 +723,15 @@ export class OfflineBackendService {
       entityType: 'message',
       entityId: response.session.id,
       action: 'session-join',
-      payload: {
-        code: normalizedCode,
-        hostPeerId: peer.id
-      }
+      payload: { code: normalizedCode, hostPeerId: peer.id }
     })
     return response.session
   }
 
-  private acceptSessionJoin(payload: JoinSessionPayload, remoteAddress?: string | null): SessionRecord {
+  private acceptSessionJoin(
+    payload: JoinSessionPayload,
+    remoteAddress?: string | null
+  ): SessionRecord {
     const hosted = this.database.getHostedSession()
     if (!hosted || hosted.code !== payload.code.trim().toUpperCase()) {
       throw new Error('Requested session is no longer available.')
@@ -722,10 +757,7 @@ export class OfflineBackendService {
       entityType: 'message',
       entityId: updated.id,
       action: 'session-accept',
-      payload: {
-        participantPeerId: payload.peerId,
-        code: updated.code
-      }
+      payload: { participantPeerId: payload.peerId, code: updated.code }
     })
     this.broadcastHeartbeat()
     return updated
@@ -744,64 +776,113 @@ export class OfflineBackendService {
     return this.database.listMessages(conversationId)
   }
 
-  async sendLanMessage(peerId: string, content: string, sessionCode?: string): Promise<ChatMessageRecord> {
-    const peer = this.database.getPeer(peerId)
-    if (!peer) {
-      throw new Error('Peer is not available on the local network.')
+  getAttachment(attachmentId: string): AttachmentRecord | undefined {
+    return this.database.getAttachment(attachmentId)
+  }
+
+  updateAttachmentSavedPath(attachmentId: string, savedPath: string): void {
+    this.database.updateAttachmentSavedPath(attachmentId, savedPath)
+  }
+
+  async sendLanMessage(
+    peerId: string,
+    content: string,
+    sessionCode?: string,
+    attachment?: {
+      type: AttachmentRecord['type']
+      name: string
+      size: number
+      mime: string
+      data: string // base64
     }
+  ): Promise<ChatMessageRecord> {
+    const peer = this.database.getPeer(peerId)
+    if (!peer) throw new Error('Peer is not available on the local network.')
 
     const normalizedSessionCode = sessionCode?.trim().toUpperCase() || null
     const conversation = this.database.ensureConversation(peer.id, peer.displayName, normalizedSessionCode)
     const createdAt = Date.now()
+    const messageId = `msg-${randomUUID()}`
+
+    // Save attachment locally first
+    let attachmentRecord: AttachmentRecord | undefined
+    if (attachment) {
+      attachmentRecord = {
+        id: `att-${randomUUID()}`,
+        messageId,
+        conversationId: conversation.id,
+        peerId: peer.id,
+        type: attachment.type,
+        name: attachment.name,
+        size: attachment.size,
+        mime: attachment.mime,
+        data: attachment.data,
+        createdAt
+      }
+      this.database.saveAttachment(attachmentRecord)
+    }
+
     const pendingMessage = this.database.addMessage({
-      id: `msg-${randomUUID()}`,
+      id: messageId,
       conversationId: conversation.id,
       peerId: peer.id,
       peerName: peer.displayName,
       senderName: this.displayName,
       recipientName: peer.displayName,
-      content,
+      content: attachment ? '' : content,
       direction: 'outgoing',
       transport: 'wifi',
       status: 'pending',
-      createdAt
+      createdAt,
+      attachmentId: attachmentRecord?.id,
+      attachmentType: attachmentRecord?.type,
+      attachmentName: attachmentRecord?.name,
+      attachmentSize: attachmentRecord?.size,
+      attachmentMime: attachmentRecord?.mime
     })
 
     this.database.addLedgerRecord({
       entityType: 'message',
       entityId: pendingMessage.id,
       action: 'lan-send',
-      payload: {
-        peerId,
-        contentLength: content.length
-      }
+      payload: { peerId, contentLength: content.length, hasAttachment: !!attachment }
     })
 
     try {
-      await this.postJson(peer, '/api/peer/message', {
+      const payload: PeerMessagePayload = {
         peerId: this.peerId,
         peerName: this.displayName,
         recipientName: peer.displayName,
-        content,
+        content: attachment ? '' : content,
         timestamp: createdAt,
         serverPort: this.serverPort,
         sessionCode: normalizedSessionCode ?? undefined
-      } satisfies PeerMessagePayload)
+      }
+
+      if (attachmentRecord) {
+        payload.attachmentId = attachmentRecord.id
+        payload.attachmentType = attachmentRecord.type
+        payload.attachmentName = attachmentRecord.name
+        payload.attachmentSize = attachmentRecord.size
+        payload.attachmentMime = attachmentRecord.mime
+        payload.attachmentData = attachmentRecord.data // inline for LAN transfer
+      }
+
+      await this.postJson(peer, '/api/peer/message', payload)
 
       const deliveredAt = Date.now()
       this.database.updateMessageStatus(pendingMessage.id, 'delivered', deliveredAt)
-      return {
-        ...pendingMessage,
-        status: 'delivered',
-        deliveredAt
-      }
+      return { ...pendingMessage, status: 'delivered', deliveredAt }
     } catch (error) {
       this.database.updateMessageStatus(pendingMessage.id, 'failed')
       throw error
     }
   }
 
-  receivePeerMessage(payload: PeerMessagePayload, remoteAddress?: string | null): ChatMessageRecord {
+  receivePeerMessage(
+    payload: PeerMessagePayload,
+    remoteAddress?: string | null
+  ): ChatMessageRecord {
     this.upsertPeerConnection(payload.peerId, payload.peerName, payload.serverPort, remoteAddress)
     const peer = this.database.getPeer(payload.peerId) ?? {
       id: payload.peerId,
@@ -815,9 +896,34 @@ export class OfflineBackendService {
       hostedSession: null
     }
 
-    const conversation = this.database.ensureConversation(peer.id, payload.peerName, payload.sessionCode)
+    const conversation = this.database.ensureConversation(
+      peer.id,
+      payload.peerName,
+      payload.sessionCode
+    )
+    const messageId = `msg-${randomUUID()}`
+    const now = Date.now()
+
+    // Save incoming attachment
+    let attachmentRecord: AttachmentRecord | undefined
+    if (payload.attachmentId && payload.attachmentData) {
+      attachmentRecord = {
+        id: payload.attachmentId,
+        messageId,
+        conversationId: conversation.id,
+        peerId: peer.id,
+        type: payload.attachmentType ?? 'file',
+        name: payload.attachmentName ?? 'file',
+        size: payload.attachmentSize ?? 0,
+        mime: payload.attachmentMime ?? 'application/octet-stream',
+        data: payload.attachmentData,
+        createdAt: payload.timestamp
+      }
+      this.database.saveAttachment(attachmentRecord)
+    }
+
     const message = this.database.addMessage({
-      id: `msg-${randomUUID()}`,
+      id: messageId,
       conversationId: conversation.id,
       peerId: peer.id,
       peerName: payload.peerName,
@@ -828,21 +934,45 @@ export class OfflineBackendService {
       transport: 'wifi',
       status: 'delivered',
       createdAt: payload.timestamp,
-      deliveredAt: Date.now()
+      deliveredAt: now,
+      attachmentId: attachmentRecord?.id,
+      attachmentType: attachmentRecord?.type,
+      attachmentName: attachmentRecord?.name,
+      attachmentSize: attachmentRecord?.size,
+      attachmentMime: attachmentRecord?.mime
     })
 
     this.database.addLedgerRecord({
       entityType: 'message',
       entityId: message.id,
       action: 'lan-receive',
-      payload: {
-        peerId: payload.peerId,
-        contentLength: payload.content.length
-      }
+      payload: { peerId: payload.peerId, contentLength: payload.content.length }
     })
 
     return message
   }
+
+  // ── Participant management ─────────────────────────────────────────────────
+
+  removeParticipant(peerId: string): void {
+    const hosted = this.database.getHostedSession()
+    if (!hosted) return
+    const updated: SessionRecord = {
+      ...hosted,
+      participantPeerIds: hosted.participantPeerIds.filter((id) => id !== peerId),
+      updatedAt: Date.now()
+    }
+    this.database.saveHostedSession(updated)
+    this.database.addLedgerRecord({
+      entityType: 'message',
+      entityId: hosted.id,
+      action: 'participant-remove',
+      payload: { peerId, code: hosted.code }
+    })
+    this.broadcastHeartbeat()
+  }
+
+  // ── Assessments ────────────────────────────────────────────────────────────
 
   async createAssessment(input: {
     title: string
@@ -855,7 +985,7 @@ export class OfflineBackendService {
     const now = Date.now()
     const assessment: AssessmentRecord = {
       id: `assessment-${randomUUID()}`,
-      code: Math.random().toString(36).slice(2, 8).toUpperCase(),
+      code: this.generateSessionCode(),
       title: input.title,
       description: input.description,
       creatorName: input.creatorName ?? this.displayName,
@@ -882,10 +1012,12 @@ export class OfflineBackendService {
     })
 
     if (assessment.sharedWithPeers) {
-      const peers = this.listPeers().filter((peer) => peer.status === 'online')
-      await Promise.allSettled(peers.map(async (peer) => {
-        await this.postJson(peer, '/api/peer/assessment', { assessment })
-      }))
+      const peers = this.listPeers().filter((p) => p.status === 'online')
+      await Promise.allSettled(
+        peers.map(async (peer) => {
+          await this.postJson(peer, '/api/peer/assessment', { assessment })
+        })
+      )
     }
 
     return assessment
@@ -897,21 +1029,21 @@ export class OfflineBackendService {
       origin: 'remote',
       updatedAt: Date.now()
     }
-
     this.database.saveAssessment(remoteAssessment)
     this.database.addLedgerRecord({
       entityType: 'assessment',
       entityId: remoteAssessment.id,
       action: 'sync-in',
-      payload: {
-        code: remoteAssessment.code,
-        hostPeerId: remoteAssessment.hostPeerId
-      }
+      payload: { code: remoteAssessment.code, hostPeerId: remoteAssessment.hostPeerId }
     })
   }
 
   listAssessments(): AssessmentRecord[] {
     return this.database.listAssessments()
+  }
+
+  getAssessment(assessmentId: string): AssessmentRecord | undefined {
+    return this.database.getAssessment(assessmentId)
   }
 
   listSubmissions(assessmentId: string): AssessmentSubmissionRecord[] {
@@ -924,9 +1056,7 @@ export class OfflineBackendService {
     answers: Record<string, string>
   }): Promise<AssessmentSubmissionRecord> {
     const assessment = this.database.getAssessment(input.assessmentId)
-    if (!assessment) {
-      throw new Error('Assessment not found.')
-    }
+    if (!assessment) throw new Error('Assessment not found.')
 
     const score = this.calculateScore(assessment.questions, input.answers)
     const submission: AssessmentSubmissionRecord = {
@@ -980,26 +1110,21 @@ export class OfflineBackendService {
   }
 
   private generateSessionCode(): string {
-    return Math.random().toString(36).slice(2, 8).toUpperCase()
+    return randomUUID().replace(/-/g, '').slice(0, 6).toUpperCase()
   }
 
-  private calculateScore(questions: AssessmentQuestion[], answers: Record<string, string>): number {
+  private calculateScore(
+    questions: AssessmentQuestion[],
+    answers: Record<string, string>
+  ): number {
     let earned = 0
     let total = 0
-
     for (const question of questions) {
       total += question.points
       const expected = question.correctAnswer?.trim().toLowerCase()
       const actual = answers[question.id]?.trim().toLowerCase()
-      if (expected && actual && expected === actual) {
-        earned += question.points
-      }
+      if (expected && actual && expected === actual) earned += question.points
     }
-
-    if (total === 0) {
-      return 0
-    }
-
-    return Math.round((earned / total) * 100)
+    return total === 0 ? 0 : Math.round((earned / total) * 100)
   }
 }

@@ -45,6 +45,12 @@ export interface ChatMessageRecord {
   deliveredAt?: number
   hash: string
   previousHash: string
+  // File/image attachment metadata (stored separately from content)
+  attachmentId?: string
+  attachmentType?: 'image' | 'pdf' | 'doc' | 'ppt' | 'file'
+  attachmentName?: string
+  attachmentSize?: number
+  attachmentMime?: string
 }
 
 export interface AssessmentQuestion {
@@ -101,7 +107,7 @@ export interface BackendStatus {
   discoveryPort: number
   backendMode: 'offline-desktop'
   blockchainMode: 'hash-ledger'
-  bluetoothSupported: false
+  bluetoothSupported: boolean
   wifiDiscoveryEnabled: boolean
   peersOnline: number
   conversations: number
@@ -128,4 +134,20 @@ export interface SessionRecord {
 export interface DevicePermissions {
   nearbyScan: 'prompt' | 'granted' | 'denied'
   localNetwork: 'granted'
+}
+
+// Attachment record stored on disk, referenced by ID in message
+export interface AttachmentRecord {
+  id: string
+  messageId: string
+  conversationId: string
+  peerId: string
+  type: 'image' | 'pdf' | 'doc' | 'ppt' | 'file'
+  name: string
+  size: number
+  mime: string
+  // base64 encoded data (stored in DB for small files, disk path for large)
+  data: string
+  savedPath?: string // local save path if user saved to disk
+  createdAt: number
 }
