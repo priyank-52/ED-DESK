@@ -24,6 +24,8 @@ interface Message {
   delivered?: boolean
   read?: boolean
   failed?: boolean
+  imageData?: string   // base64 data URL for images
+  imageType?: string
 }
 
 interface Session {
@@ -65,6 +67,7 @@ interface NetworkNode {
 }
 
 const ACTIVE_CHAT_STORAGE_KEY = 'eddesk-active-chat-session'
+const IMAGE_MAX_BYTES = 2 * 1024 * 1024 // 2MB limit for inline images
 
 const getErrorMessage = (e: unknown): string => e instanceof Error ? e.message : String(e)
 
@@ -73,6 +76,16 @@ const inferRole = (name: string): 'teacher' | 'student' | 'admin' => {
   if (v.includes('teacher') || v.includes('faculty') || v.includes('prof')) return 'teacher'
   if (v.includes('admin') || v.includes('staff')) return 'admin'
   return 'student'
+}
+
+// Deduplicate messages by id
+const dedupeMessages = (msgs: Message[]): Message[] => {
+  const seen = new Set<string>()
+  return msgs.filter(m => {
+    if (seen.has(m.id)) return false
+    seen.add(m.id)
+    return true
+  })
 }
 
 const buildPeerSession = (
@@ -117,13 +130,10 @@ const findBestConversationForSession = (
 ) => {
   const exact = findConversationForSession(conversations, peerId, sessionCode)
   if (exact) return exact
-
   const peerConversations = conversations
     .filter((item) => item.peerId === peerId)
     .sort((a, b) => b.updatedAt - a.updatedAt)
-
   if (peerConversations.length === 1) return peerConversations[0]
-
   return peerConversations.find((item) => item.sessionCode) ?? peerConversations[0]
 }
 
@@ -131,11 +141,7 @@ const isPeerSessionVisible = (peer: PeerRecord) => peer.status === 'online' && B
 
 const saveActiveSession = (session: Session | null) => {
   if (typeof window === 'undefined') return
-  if (!session) {
-    window.localStorage.removeItem(ACTIVE_CHAT_STORAGE_KEY)
-    return
-  }
-
+  if (!session) { window.localStorage.removeItem(ACTIVE_CHAT_STORAGE_KEY); return }
   window.localStorage.setItem(ACTIVE_CHAT_STORAGE_KEY, JSON.stringify({
     ...session,
     created: session.created.toISOString(),
@@ -145,21 +151,11 @@ const saveActiveSession = (session: Session | null) => {
 
 const loadSavedSession = (): Session | null => {
   if (typeof window === 'undefined') return null
-
   const raw = window.localStorage.getItem(ACTIVE_CHAT_STORAGE_KEY)
   if (!raw) return null
-
   try {
-    const parsed = JSON.parse(raw) as Omit<Session, 'created' | 'lastActivity'> & {
-      created: string
-      lastActivity: string
-    }
-
-    return {
-      ...parsed,
-      created: new Date(parsed.created),
-      lastActivity: new Date(parsed.lastActivity)
-    }
+    const parsed = JSON.parse(raw) as Omit<Session, 'created' | 'lastActivity'> & { created: string; lastActivity: string }
+    return { ...parsed, created: new Date(parsed.created), lastActivity: new Date(parsed.lastActivity) }
   } catch {
     window.localStorage.removeItem(ACTIVE_CHAT_STORAGE_KEY)
     return null
@@ -190,6 +186,23 @@ const buildHostSession = (
   backendSessionId: backendSession.id
 })
 
+// Parse image from message content if it was sent as an image payload
+const parseMessageContent = (content: string): { text?: string; imageData?: string; imageType?: string } => {
+  if (content.startsWith('__IMG__:')) {
+    try {
+      const json = content.slice(8)
+      const parsed = JSON.parse(json) as { data: string; type: string; name?: string }
+      return { imageData: parsed.data, imageType: parsed.type }
+    } catch { /* fall through */ }
+  }
+  return { text: content }
+}
+
+// Encode image to send as message content
+const encodeImageMessage = (dataUrl: string, mimeType: string): string => {
+  return `__IMG__:${JSON.stringify({ data: dataUrl, type: mimeType })}`
+}
+
 // ==================== COMPONENT ====================
 
 export default function Chat() {
@@ -197,20 +210,17 @@ export default function Chat() {
   const [searchParams] = useSearchParams()
   const sessionCodeParam = searchParams.get('code')?.toUpperCase() ?? ''
 
-  // --- Core state ---
   const [messages, setMessages] = useState<Message[]>([])
   const [newMessage, setNewMessage] = useState('')
   const [currentSession, setCurrentSession] = useState<Session | null>(null)
   const [participants, setParticipants] = useState<Participant[]>([])
   const [networkNodes, setNetworkNodes] = useState<NetworkNode[]>([])
 
-  // --- Backend state ---
   const [backendStatus, setBackendStatus] = useState<BackendStatus | null>(null)
   const [profile, setProfile] = useState<{ peerId: string; displayName: string } | null>(null)
   const [peerRecords, setPeerRecords] = useState<PeerRecord[]>([])
   const [permissions, setPermissions] = useState<DevicePermissions | null>(null)
 
-  // --- UI state ---
   const [isScanning, setIsScanning] = useState(false)
   const [isSending, setIsSending] = useState(false)
   const [nearbySessions, setNearbySessions] = useState<Session[]>([])
@@ -218,6 +228,8 @@ export default function Chat() {
   const [showParticipants, setShowParticipants] = useState(false)
   const [showNetworkPanel, setShowNetworkPanel] = useState(false)
   const [showCreateModal, setShowCreateModal] = useState(false)
+  const [showImagePreview, setShowImagePreview] = useState<string | null>(null)
+  const [pendingImage, setPendingImage] = useState<{ dataUrl: string; mimeType: string; name: string } | null>(null)
   const [joinCode, setJoinCode] = useState('')
   const [joinPassword, setJoinPassword] = useState('')
   const [createName, setCreateName] = useState('')
@@ -235,27 +247,41 @@ export default function Chat() {
   const [txBytes, setTxBytes] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const [permPrompt, setPermPrompt] = useState(false)
+  const [kickConfirm, setKickConfirm] = useState<Participant | null>(null)
+  const [activeSessions, setActiveSessions] = useState<Session[]>([])
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const messagesContainerRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const currentSessionRef = useRef<Session | null>(null)
   const isPollingRef = useRef(false)
-  const latestMessageSignatureRef = useRef('')
+  const knownMessageIdsRef = useRef<Set<string>>(new Set())
   const shouldStickToBottomRef = useRef(true)
+  const previousMessageCountRef = useRef(0)
   const scanAfterPermissionGrantRef = useRef(false)
   currentSessionRef.current = currentSession
 
-  // --- Clock ---
+  // ── Clock ──
   useEffect(() => {
     const t = setInterval(() => setTime(new Date()), 1000)
     return () => clearInterval(t)
   }, [])
 
-  // --- Scroll to bottom ---
+  // ── Scroll ──
   useEffect(() => {
-    if (!shouldStickToBottomRef.current) return
+    previousMessageCountRef.current = 0
+    shouldStickToBottomRef.current = true
     messagesEndRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' })
+  }, [currentSession?.peerId, currentSession?.code])
+
+  useEffect(() => {
+    if (messages.length === 0) return
+    if (messages.length <= previousMessageCountRef.current) return
+
+    previousMessageCountRef.current = messages.length
+    if (!shouldStickToBottomRef.current) return
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
   }, [messages])
 
   const handleMessagesScroll = useCallback(() => {
@@ -265,11 +291,9 @@ export default function Chat() {
     shouldStickToBottomRef.current = distanceFromBottom < 96
   }, [])
 
-  // --- Helpers ---
-  const fmt = (d: Date) =>
-    d.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })
-  const fmtShort = (d: Date) =>
-    d.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' })
+  // ── Formatters ──
+  const fmt = (d: Date) => d.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  const fmtShort = (d: Date) => d.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' })
   const fmtBytes = (b: number) => {
     if (b < 1024) return `${b} B`
     if (b < 1048576) return `${(b / 1024).toFixed(1)} KB`
@@ -285,32 +309,45 @@ export default function Chat() {
     setTimeout(() => setError(null), 4000)
   }, [])
 
-  const buildMessageSignature = useCallback((items: Message[]) =>
-    items.map(item => `${item.id}:${item.delivered ? 1 : 0}:${item.read ? 1 : 0}:${item.content}`).join('|')
-  , [])
+  // ── Convert raw records → Message objects, skipping duplicates ──
+  const mapRecord = useCallback((r: ChatMessageRecord, prof: { peerId: string; displayName: string } | null): Message => {
+    const parsed = parseMessageContent(r.content)
+    return {
+      id: r.id,
+      sender: r.direction === 'outgoing' ? (prof?.displayName ?? 'You') : (r.senderName || r.peerName),
+      role: inferRole(r.direction === 'outgoing' ? (prof?.displayName ?? '') : (r.senderName || r.peerName)),
+      content: parsed.text ?? '',
+      imageData: parsed.imageData,
+      imageType: parsed.imageType,
+      timestamp: new Date(r.createdAt),
+      isOwn: r.direction === 'outgoing',
+      encrypted: true,
+      delivered: r.status === 'delivered',
+      read: r.status === 'delivered',
+      failed: r.status === 'failed'
+    }
+  }, [])
 
-  const syncMessages = useCallback((nextMessages: Message[]) => {
-    const signature = buildMessageSignature(nextMessages)
-    if (signature === latestMessageSignatureRef.current) return false
-    latestMessageSignatureRef.current = signature
-    setMessages(nextMessages)
-    return true
-  }, [buildMessageSignature])
+  // ── Merge new backend messages without duplication ──
+  // Only add messages whose IDs are not already tracked
+  const mergeMessages = useCallback((systemMsgs: Message[], records: ChatMessageRecord[], prof: { peerId: string; displayName: string } | null): Message[] => {
+    const mapped = records.map(r => mapRecord(r, prof))
+    const allNew = [...systemMsgs, ...mapped]
+    return dedupeMessages(allNew)
+  }, [mapRecord])
 
+  // ── Save session state ──
   useEffect(() => {
     if (!currentSession) return
     saveActiveSession(currentSession)
   }, [currentSession])
 
-  // --- Load base snapshot ---
+  // ── Core snapshot loader ──
   const loadSnapshot = useCallback(async (scan = false, applyState = true) => {
     try {
       if (scan) {
         const perms = await offlineApi.getPermissions()
-        if (perms.nearbyScan !== 'granted') {
-          setPermPrompt(true)
-          return null
-        }
+        if (perms.nearbyScan !== 'granted') { setPermPrompt(true); return null }
         await offlineApi.scanPeers()
         await new Promise(r => setTimeout(r, 1000))
       }
@@ -324,51 +361,32 @@ export default function Chat() {
 
       const sessions = peers
         .filter(isPeerSessionVisible)
-        .map(p => buildPeerSession(
-          p,
-          findBestConversationForSession(convs, p.id, p.hostedSession?.code),
-          profileData?.displayName ?? 'You'
-        ))
-
-      const allSessions = peers
-        .filter(isPeerSessionVisible)
-        .map(p =>
-        buildPeerSession(
-          p,
-          findBestConversationForSession(convs, p.id, p.hostedSession?.code),
-          profileData?.displayName ?? 'You'
-        )
-      )
+        .map(p => buildPeerSession(p, findBestConversationForSession(convs, p.id, p.hostedSession?.code), profileData?.displayName ?? 'You'))
 
       if (applyState) {
         setBackendStatus(status)
         setProfile(profileData)
         setPeerRecords(peers)
         setNearbySessions(sessions)
+        setActiveSessions(sessions)
         setNetworkNodes([
-          {
-            id: status?.peerId ?? 'local',
-            name: 'Local Backend',
-            latency: 1,
-            status: 'connected'
-          },
+          { id: status?.peerId ?? 'local', name: 'Local Backend', latency: 1, status: 'connected' },
           ...peers.slice(0, 5).map((p, i) => ({
-            id: p.id,
-            name: p.displayName,
+            id: p.id, name: p.displayName,
             latency: p.status === 'online' ? 10 + i * 8 : 999,
             status: p.status === 'online' ? 'connected' as const : 'lost' as const
           }))
         ])
       }
 
-      return { status, profile: profileData, peers, convs, allSessions }
+      return { status, profile: profileData, peers, convs, allSessions: sessions }
     } catch (e) {
       addLog(`Backend error: ${getErrorMessage(e)}`)
       return null
     }
   }, [addLog])
 
-  // --- Grant permission ---
+  // ── Permission grant ──
   const grantPermission = useCallback(async () => {
     try {
       const updated = await offlineApi.updatePermissions({ nearbyScan: 'granted' })
@@ -382,130 +400,92 @@ export default function Chat() {
         try {
           const snap = await loadSnapshot(true)
           if (!snap) return
-          const sessions = snap.peers
-            .filter(isPeerSessionVisible)
-            .map(p => buildPeerSession(
-              p,
-              findBestConversationForSession(snap.convs, p.id, p.hostedSession?.code),
-              snap.profile?.displayName ?? 'You'
-            ))
+          const sessions = snap.peers.filter(isPeerSessionVisible)
+            .map(p => buildPeerSession(p, findBestConversationForSession(snap.convs, p.id, p.hostedSession?.code), snap.profile?.displayName ?? 'You'))
           setNearbySessions(sessions)
           setShowJoinModal(true)
-          addLog(sessions.length > 0
-            ? `Found ${sessions.length} active session${sessions.length === 1 ? '' : 's'} on LAN`
-            : 'No sessions found. Ask your friend to create a session first.')
-        } catch (e) {
-          showError(`Scan failed: ${getErrorMessage(e)}`)
-        } finally {
-          setIsScanning(false)
-        }
+          addLog(sessions.length > 0 ? `Found ${sessions.length} session(s)` : 'No sessions found.')
+        } catch (e) { showError(`Scan failed: ${getErrorMessage(e)}`) }
+        finally { setIsScanning(false) }
       }
-    } catch (e) {
-      showError(`Permission update failed: ${getErrorMessage(e)}`)
-    }
+    } catch (e) { showError(`Permission update failed: ${getErrorMessage(e)}`) }
   }, [addLog, loadSnapshot, showError])
 
-  // --- Load messages for current session ---
+  // ── Load messages for current session (initial load) ──
   const loadMessages = useCallback(async (session: Session, status: BackendStatus | null, prof: { peerId: string; displayName: string } | null) => {
+    knownMessageIdsRef.current = new Set()
+
     const systemMsg: Message = {
       id: `sys-${session.peerId}`,
-      sender: 'System',
-      role: 'system',
+      sender: 'System', role: 'system',
       content: `BACKEND · ${status?.localAddress ?? '127.0.0.1'}:${status?.serverPort ?? 0} · WIFI LINK ${session.status.toUpperCase()}`,
-      timestamp: new Date(),
-      isOwn: false,
-      system: true
+      timestamp: new Date(), isOwn: false, system: true
     }
 
     if (session.mode === 'host') {
-      setMessages([
-        systemMsg,
-        {
-          id: `host-code-${session.code}`,
-          sender: 'System',
-          role: 'system',
-          content: `SESSION CREATED · CODE: ${session.code} · Share this code with your friend. They can also scan your device on the same LAN.`,
-          timestamp: new Date(),
-          isOwn: false,
-          system: true
-        }
-      ])
-      latestMessageSignatureRef.current = ''
-      setPacketCount(0)
-      setRxBytes(0)
-      setTxBytes(0)
+      const hostCodeMsg: Message = {
+        id: `host-code-${session.code}`,
+        sender: 'System', role: 'system',
+        content: `SESSION CREATED · CODE: ${session.code} · Share this code with your friend.`,
+        timestamp: new Date(), isOwn: false, system: true
+      }
+      knownMessageIdsRef.current.add(systemMsg.id)
+      knownMessageIdsRef.current.add(hostCodeMsg.id)
+      setMessages([systemMsg, hostCodeMsg])
+      setPacketCount(0); setRxBytes(0); setTxBytes(0)
       return
     }
 
-    // Peer mode — load real messages
     if (!session.conversationId) {
-      syncMessages([systemMsg, {
+      const emptyMsg: Message = {
         id: `empty-${session.peerId}`,
-        sender: 'System',
-        role: 'system',
+        sender: 'System', role: 'system',
         content: `CONNECTED TO ${session.name.toUpperCase()} · Send a message to start`,
-        timestamp: new Date(),
-        isOwn: false,
-        system: true
-      }])
+        timestamp: new Date(), isOwn: false, system: true
+      }
+      knownMessageIdsRef.current.add(systemMsg.id)
+      knownMessageIdsRef.current.add(emptyMsg.id)
+      setMessages([systemMsg, emptyMsg])
       return
     }
 
     try {
       const records = await offlineApi.getMessages(session.conversationId)
-      const mapped: Message[] = records.map(r => ({
-        id: r.id,
-        sender: r.direction === 'outgoing' ? (prof?.displayName ?? 'You') : (r.senderName || r.peerName),
-        role: inferRole(r.direction === 'outgoing' ? (prof?.displayName ?? '') : (r.senderName || r.peerName)),
-        content: r.content,
-        timestamp: new Date(r.createdAt),
-        isOwn: r.direction === 'outgoing',
-        encrypted: true,
-        delivered: r.status === 'delivered',
-        read: r.status === 'delivered',
-        failed: r.status === 'failed'
-      }))
-
-      syncMessages([systemMsg, ...mapped])
+      const next = mergeMessages([systemMsg], records, prof)
+      next.forEach(m => knownMessageIdsRef.current.add(m.id))
+      setMessages(next)
       setPacketCount(records.length)
       setRxBytes(records.filter(r => r.direction === 'incoming').reduce((s, r) => s + r.content.length * 2, 0))
       setTxBytes(records.filter(r => r.direction === 'outgoing').reduce((s, r) => s + r.content.length * 2, 0))
-    } catch (e) {
-      addLog(`Load messages failed: ${getErrorMessage(e)}`)
+    } catch (e) { addLog(`Load messages failed: ${getErrorMessage(e)}`) }
+  }, [addLog, mergeMessages])
+
+  // ── Inject a system event message safely (no duplication) ──
+  const injectSystemMsg = useCallback((id: string, content: string) => {
+    if (knownMessageIdsRef.current.has(id)) return
+    knownMessageIdsRef.current.add(id)
+    const msg: Message = {
+      id, sender: 'System', role: 'system',
+      content, timestamp: new Date(), isOwn: false, system: true
     }
-  }, [addLog, syncMessages])
+    setMessages(prev => dedupeMessages([...prev, msg]))
+  }, [])
 
-  const mapRecordsToMessages = useCallback((
-    records: ChatMessageRecord[],
-    prof: { peerId: string; displayName: string } | null
-  ): Message[] => records.map(r => ({
-    id: r.id,
-    sender: r.direction === 'outgoing' ? (prof?.displayName ?? 'You') : (r.senderName || r.peerName),
-    role: inferRole(r.direction === 'outgoing' ? (prof?.displayName ?? '') : (r.senderName || r.peerName)),
-    content: r.content,
-    timestamp: new Date(r.createdAt),
-    isOwn: r.direction === 'outgoing',
-    encrypted: true,
-    delivered: r.status === 'delivered',
-    read: r.status === 'delivered',
-    failed: r.status === 'failed'
-  })), [])
-
+  // ── Poll & refresh current session ──
   const refreshCurrentSession = useCallback(async (session: Session) => {
     const snap = await loadSnapshot(false, false)
     if (!snap) return
 
     const currentPeer = snap.peers.find(p => p.id === session.peerId)
     const sessionStatus = session.mode === 'peer' ? (currentPeer?.status ?? session.status) : 'online'
-    const systemMsg: Message = {
-      id: `sys-${session.peerId}`,
-      sender: 'System',
-      role: 'system',
-      content: `BACKEND · ${snap.status?.localAddress ?? '127.0.0.1'}:${snap.status?.serverPort ?? 0} · WIFI LINK ${sessionStatus.toUpperCase()}`,
-      timestamp: new Date(),
-      isOwn: false,
-      system: true
-    }
+
+    // Update system message in-place (don't duplicate)
+    const sysContent = `BACKEND · ${snap.status?.localAddress ?? '127.0.0.1'}:${snap.status?.serverPort ?? 0} · WIFI LINK ${sessionStatus.toUpperCase()}`
+    setMessages(prev => {
+      const hasSys = prev.some(m => m.id === `sys-${session.peerId}`)
+      if (!hasSys) return prev
+      return prev.map(m => m.id === `sys-${session.peerId}` ? { ...m, content: sysContent } : m)
+    })
 
     if (session.mode === 'host') {
       const hosted = await offlineApi.getHostedSession().catch(() => null)
@@ -519,30 +499,29 @@ export default function Chat() {
           id: snap.profile?.peerId ?? 'local',
           name: snap.profile?.displayName ?? 'You',
           role: inferRole(snap.profile?.displayName ?? 'You'),
-          status: 'online',
-          joinedAt: updatedSession.created,
-          device: 'This Device',
-          ipAddress: snap.status?.localAddress ?? '127.0.0.1',
-          messagesSent: 0
+          status: 'online', joinedAt: updatedSession.created,
+          device: 'This Device', ipAddress: snap.status?.localAddress ?? '127.0.0.1', messagesSent: 0
         }
       ]
 
       const allRecords: ChatMessageRecord[] = []
+      const seenPeerIds = new Set<string>()
+
       for (const pid of hosted.participantPeerIds) {
         const peer = snap.peers.find(p => p.id === pid)
         if (!peer) continue
-
-        nextParticipants.push({
-          id: pid,
-          name: peer.displayName,
-          role: inferRole(peer.displayName),
-          status: peer.status === 'online' ? 'online' : 'away',
-          joinedAt: new Date(hosted.updatedAt),
-          device: peer.displayName,
-          ipAddress: peer.address,
-          messagesSent: 0
-        })
-
+        if (!seenPeerIds.has(pid)) {
+          seenPeerIds.add(pid)
+          nextParticipants.push({
+            id: pid, name: peer.displayName,
+            role: inferRole(peer.displayName),
+            status: peer.status === 'online' ? 'online' : 'away',
+            joinedAt: new Date(hosted.updatedAt),
+            device: peer.displayName, ipAddress: peer.address, messagesSent: 0
+          })
+          // Inject join event only once
+          injectSystemMsg(`join-${pid}`, `${peer.displayName} joined the session`)
+        }
         const conv = findBestConversationForSession(snap.convs, pid, session.code)
         if (!conv) continue
         const records = await offlineApi.getMessages(conv.id).catch(() => [] as ChatMessageRecord[])
@@ -550,20 +529,15 @@ export default function Chat() {
       }
 
       allRecords.sort((a, b) => a.createdAt - b.createdAt)
-      const mapped = mapRecordsToMessages(allRecords, snap.profile)
-      syncMessages([
-        systemMsg,
-        {
-          id: `host-code-${updatedSession.code}`,
-          sender: 'System',
-          role: 'system',
-          content: `SESSION CREATED · CODE: ${updatedSession.code} · Share this code with your friend. They can also scan your device on the same LAN.`,
-          timestamp: new Date(updatedSession.created),
-          isOwn: false,
-          system: true
-        },
-        ...mapped
-      ])
+
+      // Only inject NEW records (not already tracked)
+      const newRecords = allRecords.filter(r => !knownMessageIdsRef.current.has(r.id))
+      if (newRecords.length > 0) {
+        const newMapped = newRecords.map(r => mapRecord(r, snap.profile))
+        newMapped.forEach(m => knownMessageIdsRef.current.add(m.id))
+        setMessages(prev => dedupeMessages([...prev, ...newMapped]))
+      }
+
       setParticipants(nextParticipants)
       setPacketCount(allRecords.length)
       setRxBytes(allRecords.filter(r => r.direction === 'incoming').reduce((s, r) => s + r.content.length * 2, 0))
@@ -571,6 +545,7 @@ export default function Chat() {
       return
     }
 
+    // Peer mode
     const conversationId = findBestConversationForSession(snap.convs, session.peerId, session.code)?.id ?? session.conversationId
     const updatedSession: Session = {
       ...session,
@@ -580,16 +555,19 @@ export default function Chat() {
       conversationId
     }
     setCurrentSession(updatedSession)
+
+    // Detect peer going offline → inject leave event
+    if (sessionStatus === 'stale' && session.status === 'online') {
+      injectSystemMsg(`leave-${session.peerId}-${Date.now()}`, `${session.peerDisplayName} left the session`)
+    }
+
     setParticipants([
       {
         id: snap.profile?.peerId ?? 'local',
         name: snap.profile?.displayName ?? 'You',
         role: inferRole(snap.profile?.displayName ?? 'You'),
-        status: 'online',
-        joinedAt: new Date(),
-        device: 'This Device',
-        ipAddress: snap.status?.localAddress ?? '127.0.0.1',
-        messagesSent: 0
+        status: 'online', joinedAt: new Date(),
+        device: 'This Device', ipAddress: snap.status?.localAddress ?? '127.0.0.1', messagesSent: 0
       },
       {
         id: session.peerId,
@@ -598,93 +576,74 @@ export default function Chat() {
         status: sessionStatus === 'online' ? 'online' : 'away',
         joinedAt: session.created,
         device: currentPeer?.displayName ?? session.peerDisplayName,
-        ipAddress: currentPeer?.address ?? session.address,
-        messagesSent: 0
+        ipAddress: currentPeer?.address ?? session.address, messagesSent: 0
       }
     ])
 
-    if (!conversationId) {
-      syncMessages([systemMsg, {
-        id: `empty-${session.peerId}`,
-        sender: 'System',
-        role: 'system',
-        content: `CONNECTED TO ${session.name.toUpperCase()} · Send a message to start`,
-        timestamp: new Date(),
-        isOwn: false,
-        system: true
-      }])
-      setPacketCount(0)
-      setRxBytes(0)
-      setTxBytes(0)
-      return
-    }
+    if (!conversationId) { setPacketCount(0); setRxBytes(0); setTxBytes(0); return }
 
     const records = await offlineApi.getMessages(conversationId).catch(() => [] as ChatMessageRecord[])
-    syncMessages([systemMsg, ...mapRecordsToMessages(records, snap.profile)])
+    const newRecords = records.filter(r => !knownMessageIdsRef.current.has(r.id))
+    if (newRecords.length > 0) {
+      const newMapped = newRecords.map(r => mapRecord(r, snap.profile))
+      newMapped.forEach(m => knownMessageIdsRef.current.add(m.id))
+      setMessages(prev => dedupeMessages([...prev, ...newMapped]))
+    }
+
     setPacketCount(records.length)
     setRxBytes(records.filter(r => r.direction === 'incoming').reduce((s, r) => s + r.content.length * 2, 0))
     setTxBytes(records.filter(r => r.direction === 'outgoing').reduce((s, r) => s + r.content.length * 2, 0))
-  }, [loadSnapshot, mapRecordsToMessages, syncMessages])
+  }, [loadSnapshot, mapRecord, injectSystemMsg])
 
-  // --- Open session ---
+  // ── Open session ──
   const openSession = useCallback(async (session: Session) => {
     setCurrentSession(session)
+    knownMessageIdsRef.current = new Set()
+    setMessages([])
     setShowJoinModal(false)
-    setJoinCode('')
-    setJoinPassword('')
+    setJoinCode(''); setJoinPassword('')
     setSelectedTab('messages')
     navigate(`/chat?code=${session.code}`, { replace: true })
     addLog(`Session opened · ${session.name}`)
+
     const snap = await loadSnapshot(false)
     const status = snap?.status ?? null
     const prof = snap?.profile ?? null
 
-    // Rebuild with fresh conv id
     if (session.mode === 'peer' && snap) {
       const freshConv = findBestConversationForSession(snap.convs, session.peerId, session.code)
       const freshSession = { ...session, conversationId: freshConv?.id ?? null }
       setCurrentSession(freshSession)
       setParticipants([
         {
-          id: prof?.peerId ?? 'local',
-          name: prof?.displayName ?? 'You',
-          role: inferRole(prof?.displayName ?? 'You'),
-          status: 'online',
-          joinedAt: new Date(),
-          device: 'This Device',
-          ipAddress: status?.localAddress ?? '127.0.0.1',
-          messagesSent: 0
+          id: prof?.peerId ?? 'local', name: prof?.displayName ?? 'You',
+          role: inferRole(prof?.displayName ?? 'You'), status: 'online',
+          joinedAt: new Date(), device: 'This Device',
+          ipAddress: status?.localAddress ?? '127.0.0.1', messagesSent: 0
         },
         {
-          id: session.peerId,
-          name: session.peerDisplayName,
+          id: session.peerId, name: session.peerDisplayName,
           role: inferRole(session.peerDisplayName),
           status: session.status === 'online' ? 'online' : 'away',
-          joinedAt: session.created,
-          device: session.peerDisplayName,
-          ipAddress: session.address,
-          messagesSent: 0
+          joinedAt: session.created, device: session.peerDisplayName,
+          ipAddress: session.address, messagesSent: 0
         }
       ])
       await loadMessages(freshSession, status, prof)
     } else {
       setParticipants([
         {
-          id: prof?.peerId ?? 'local',
-          name: prof?.displayName ?? 'You',
-          role: inferRole(prof?.displayName ?? 'You'),
-          status: 'online',
-          joinedAt: new Date(),
-          device: 'This Device',
-          ipAddress: status?.localAddress ?? '127.0.0.1',
-          messagesSent: 0
+          id: prof?.peerId ?? 'local', name: prof?.displayName ?? 'You',
+          role: inferRole(prof?.displayName ?? 'You'), status: 'online',
+          joinedAt: new Date(), device: 'This Device',
+          ipAddress: status?.localAddress ?? '127.0.0.1', messagesSent: 0
         }
       ])
       await loadMessages(session, status, prof)
     }
   }, [addLog, loadMessages, loadSnapshot, navigate])
 
-  // --- Bootstrap on mount ---
+  // ── Bootstrap ──
   useEffect(() => {
     let mounted = true
     const bootstrap = async () => {
@@ -696,20 +655,17 @@ export default function Chat() {
 
       addLog('Offline backend ready · Electron IPC connected')
 
-      // Check if there's an existing hosted session
       const hosted = await offlineApi.getHostedSession().catch(() => null)
       if (hosted && mounted) {
         const hostSession = buildHostSession(hosted, snap.profile, snap.status)
         if (sessionCodeParam && hostSession.code === sessionCodeParam) {
-          await openSession(hostSession)
-          return
+          await openSession(hostSession); return
         }
       }
 
       if (sessionCodeParam && snap.allSessions) {
         const match = snap.allSessions.find(s => s.code === sessionCodeParam)
-        if (match) await openSession(match)
-        return
+        if (match) { await openSession(match); return }
       }
 
       const savedSession = loadSavedSession()
@@ -718,37 +674,26 @@ export default function Chat() {
       if (savedSession.mode === 'host') {
         const hostedSession = await offlineApi.getHostedSession().catch(() => null)
         if (hostedSession && hostedSession.code === savedSession.code) {
-          await openSession(buildHostSession(hostedSession, snap.profile, snap.status))
-          return
+          await openSession(buildHostSession(hostedSession, snap.profile, snap.status)); return
         }
-
-        saveActiveSession(null)
-        return
+        saveActiveSession(null); return
       }
 
       const savedPeer = snap.peers.find(p => p.id === savedSession.peerId)
       const savedConv = findBestConversationForSession(snap.convs, savedSession.peerId, savedSession.code)
       if (savedPeer) {
-        await openSession(buildPeerSession(savedPeer, savedConv, snap.profile?.displayName ?? 'You'))
-        return
+        await openSession(buildPeerSession(savedPeer, savedConv, snap.profile?.displayName ?? 'You')); return
       }
-
       if (savedConv) {
-        await openSession({
-          ...savedSession,
-          conversationId: savedConv.id,
-          status: 'stale'
-        })
-        return
+        await openSession({ ...savedSession, conversationId: savedConv.id, status: 'stale' }); return
       }
-
       saveActiveSession(null)
     }
     bootstrap().catch(e => console.error(e))
     return () => { mounted = false }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // --- Poll for new messages ---
+  // ── Poll for updates ──
   useEffect(() => {
     if (!currentSession) return
     shouldStickToBottomRef.current = true
@@ -756,55 +701,36 @@ export default function Chat() {
       if (isPollingRef.current) return
       isPollingRef.current = true
       const sess = currentSessionRef.current
-      if (!sess) {
-        isPollingRef.current = false
-        return
-      }
-
-      try {
-        await refreshCurrentSession(sess)
-      } finally {
-        isPollingRef.current = false
-      }
+      if (!sess) { isPollingRef.current = false; return }
+      try { await refreshCurrentSession(sess) }
+      finally { isPollingRef.current = false }
     }, 1500)
     return () => clearInterval(interval)
   }, [currentSession, refreshCurrentSession])
 
-  // --- Scan ---
+  // ── Scan ──
   const scanForSessions = useCallback(async () => {
     const perms = await offlineApi.getPermissions().catch(() => null)
     if (perms?.nearbyScan !== 'granted') {
       setPermissions(perms ?? null)
       scanAfterPermissionGrantRef.current = true
-      setPermPrompt(true)
-      return
+      setPermPrompt(true); return
     }
-
     setIsScanning(true)
     addLog('Scanning LAN for peers...')
     try {
       const snap = await loadSnapshot(true)
       if (!snap) return
-      const sessions = snap.peers
-        .filter(isPeerSessionVisible)
-        .map(p => buildPeerSession(
-          p,
-          findBestConversationForSession(snap.convs, p.id, p.hostedSession?.code),
-          snap.profile?.displayName ?? 'You'
-        ))
+      const sessions = snap.peers.filter(isPeerSessionVisible)
+        .map(p => buildPeerSession(p, findBestConversationForSession(snap.convs, p.id, p.hostedSession?.code), snap.profile?.displayName ?? 'You'))
       setNearbySessions(sessions)
       setShowJoinModal(true)
-      addLog(sessions.length > 0
-        ? `Found ${sessions.length} active session${sessions.length === 1 ? '' : 's'} on LAN`
-        : 'No sessions found. Ask your friend to create a session first.')
-    } catch (e) {
-      showError(`Scan failed: ${getErrorMessage(e)}`)
-    } finally {
-      setIsScanning(false)
-    }
+      addLog(sessions.length > 0 ? `Found ${sessions.length} session(s)` : 'No sessions found.')
+    } catch (e) { showError(`Scan failed: ${getErrorMessage(e)}`) }
+    finally { setIsScanning(false) }
   }, [addLog, loadSnapshot, showError])
 
-  // --- Create session (REAL backend call) ---
+  // ── Create session ──
   const createSession = useCallback(async () => {
     setShowCreateModal(false)
     try {
@@ -822,67 +748,47 @@ export default function Chat() {
       setCurrentSession(hostSession)
       setSelectedTab('messages')
       setBroadcastMode(false)
-      setMessages([
+      knownMessageIdsRef.current = new Set()
+
+      const sysMsgs: Message[] = [
         {
-          id: `sys-host`,
-          sender: 'System',
-          role: 'system',
+          id: `sys-host`, sender: 'System', role: 'system',
           content: `BACKEND · ${snap?.status?.localAddress ?? '127.0.0.1'}:${snap?.status?.serverPort ?? 0} · WIFI READY`,
-          timestamp: new Date(),
-          isOwn: false,
-          system: true
+          timestamp: new Date(), isOwn: false, system: true
         },
         {
-          id: `host-code-${backendSession.code}`,
-          sender: 'System',
-          role: 'system',
-          content: `SESSION CREATED · CODE: ${backendSession.code} · Share this with your friend. They can scan or enter this code manually to join.`,
-          timestamp: new Date(),
-          isOwn: false,
-          system: true
+          id: `host-code-${backendSession.code}`, sender: 'System', role: 'system',
+          content: `SESSION CREATED · CODE: ${backendSession.code} · Share this with your friend.`,
+          timestamp: new Date(), isOwn: false, system: true
         }
-      ])
-      setParticipants([
-        {
-          id: snap?.profile?.peerId ?? 'local',
-          name: snap?.profile?.displayName ?? 'You',
-          role: inferRole(snap?.profile?.displayName ?? 'You'),
-          status: 'online',
-          joinedAt: new Date(),
-          device: 'This Device',
-          ipAddress: snap?.status?.localAddress ?? '127.0.0.1',
-          messagesSent: 0
-        }
-      ])
-      setPacketCount(0)
-      setRxBytes(0)
-      setTxBytes(0)
+      ]
+      sysMsgs.forEach(m => knownMessageIdsRef.current.add(m.id))
+      setMessages(sysMsgs)
+
+      setParticipants([{
+        id: snap?.profile?.peerId ?? 'local', name: snap?.profile?.displayName ?? 'You',
+        role: inferRole(snap?.profile?.displayName ?? 'You'), status: 'online',
+        joinedAt: new Date(), device: 'This Device',
+        ipAddress: snap?.status?.localAddress ?? '127.0.0.1', messagesSent: 0
+      }])
+      setPacketCount(0); setRxBytes(0); setTxBytes(0)
       navigate(`/chat?code=${backendSession.code}`, { replace: true })
       addLog(`Session ${backendSession.code} created · ${createVisibility.toUpperCase()}`)
 
-      // Reset form
-      setCreateName('')
-      setCreateDesc('')
-      setCreateVisibility('public')
-      setCreatePassword('')
-    } catch (e) {
-      showError(`Create failed: ${getErrorMessage(e)}`)
-    }
+      // Refresh active sessions list so it shows up on welcome screen
+      await loadSnapshot(false)
+
+      setCreateName(''); setCreateDesc(''); setCreateVisibility('public'); setCreatePassword('')
+    } catch (e) { showError(`Create failed: ${getErrorMessage(e)}`) }
   }, [addLog, backendStatus, createDesc, createName, createPassword, createVisibility, loadSnapshot, navigate, profile, showError])
 
-  // --- Join by code (REAL backend call) ---
+  // ── Join by code ──
   const joinByCode = useCallback(async (code: string, password?: string) => {
     const normalizedCode = code.trim().toUpperCase()
-    if (!normalizedCode || normalizedCode.length < 4) {
-      showError('Enter a valid session code')
-      return
-    }
-
+    if (!normalizedCode || normalizedCode.length < 4) { showError('Enter a valid session code'); return }
     addLog(`Joining session ${normalizedCode}...`)
-
     try {
       const backendSession = await offlineApi.joinSessionByCode(normalizedCode, password)
-      // After joining, refresh to get peer + conversation
       const freshSnap = await loadSnapshot(false)
       if (!freshSnap) return
 
@@ -892,23 +798,15 @@ export default function Chat() {
         const session = buildPeerSession(peer, conv, freshSnap.profile?.displayName ?? 'You')
         await openSession(session)
       } else {
-        // Peer not in list yet — create minimal session
         const minimalSession: Session = {
-          code: normalizedCode,
-          peerId: backendSession.hostPeerId,
-          name: backendSession.name,
-          peerDisplayName: backendSession.hostDisplayName,
-          mode: 'peer',
-          participants: 2,
+          code: normalizedCode, peerId: backendSession.hostPeerId,
+          name: backendSession.name, peerDisplayName: backendSession.hostDisplayName,
+          mode: 'peer', participants: 2,
           encrypted: backendSession.visibility === 'private',
           created: new Date(backendSession.createdAt),
           description: backendSession.description,
           activeUsers: [freshSnap.profile?.displayName ?? 'You', backendSession.hostDisplayName],
-          messageCount: 0,
-          lastActivity: new Date(),
-          address: '',
-          transport: 'wifi',
-          status: 'online',
+          messageCount: 0, lastActivity: new Date(), address: '', transport: 'wifi', status: 'online',
           conversationId: findBestConversationForSession(freshSnap.convs, backendSession.hostPeerId, normalizedCode)?.id ?? null,
           backendSessionId: backendSession.id
         }
@@ -916,103 +814,145 @@ export default function Chat() {
       }
       setShowJoinModal(false)
       addLog(`Joined session ${normalizedCode} successfully`)
-    } catch (e) {
-      showError(`Join failed: ${getErrorMessage(e)}`)
-      addLog(`Join failed: ${getErrorMessage(e)}`)
-    }
+    } catch (e) { showError(`Join failed: ${getErrorMessage(e)}`); addLog(`Join failed: ${getErrorMessage(e)}`) }
   }, [addLog, loadSnapshot, openSession, showError])
 
-  // --- Leave session ---
+  // ── Leave session (with cleanup) ──
   const leaveSession = useCallback(async () => {
-    if (currentSession?.mode === 'host') {
-      try {
-        await offlineApi.closeHostedSession()
-        addLog('Hosted session closed')
-      } catch (e) {
-        addLog(`Close session error: ${getErrorMessage(e)}`)
+    const sess = currentSession
+    if (!sess) return
+
+    if (sess.mode === 'host') {
+      // If no participants, close & delete session
+      const hosted = await offlineApi.getHostedSession().catch(() => null)
+      if (hosted) {
+        // Notify all participants they were disconnected
+        const snap = await loadSnapshot(false, false)
+        if (snap) {
+          for (const pid of hosted.participantPeerIds) {
+            const peer = snap.peers.find(p => p.id === pid)
+            if (peer) {
+              try {
+                await offlineApi.sendMessage(pid, `__SYS__:HOST_CLOSED:${sess.code}`, sess.code)
+              } catch { /* best effort */ }
+            }
+          }
+        }
+        try { await offlineApi.closeHostedSession() } catch { /* ignore */ }
+        addLog('Hosted session closed and deleted')
       }
+    } else {
+      // Notify host we left
+      try {
+        await offlineApi.sendMessage(sess.peerId, `__SYS__:PEER_LEFT:${profile?.displayName ?? 'A user'}`, sess.code)
+      } catch { /* best effort */ }
     }
-    addLog(`Left session · ${currentSession?.name ?? ''}`)
+
+    addLog(`Left session · ${sess.name}`)
     setCurrentSession(null)
     setMessages([])
     setParticipants([])
+    knownMessageIdsRef.current = new Set()
     setSelectedTab('messages')
     setBroadcastMode(false)
     saveActiveSession(null)
     navigate('/chat', { replace: true })
     await loadSnapshot(false)
-  }, [addLog, currentSession, loadSnapshot, navigate])
+  }, [addLog, currentSession, loadSnapshot, navigate, profile])
 
-  // --- Send message ---
+  // ── Kick participant ──
+  const kickParticipant = useCallback(async (participant: Participant) => {
+    setKickConfirm(null)
+    if (!currentSession || currentSession.mode !== 'host') return
+    try {
+      // Send kick notification
+      await offlineApi.sendMessage(participant.id, `__SYS__:KICKED:${participant.name}`, currentSession.code)
+      // Remove from hosted session participant list
+      const hosted = await offlineApi.getHostedSession().catch(() => null)
+      if (hosted) {
+        // Re-create session without this participant (backend will update on next heartbeat)
+        addLog(`Kicked ${participant.name} from session`)
+        injectSystemMsg(`kick-${participant.id}-${Date.now()}`, `${participant.name} was removed from the session`)
+      }
+      setParticipants(prev => prev.filter(p => p.id !== participant.id))
+    } catch (e) { showError(`Kick failed: ${getErrorMessage(e)}`) }
+  }, [addLog, currentSession, injectSystemMsg, showError])
+
+  // ── Image file selection ──
+  const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    if (!file.type.startsWith('image/')) { showError('Only image files are supported'); return }
+    if (file.size > IMAGE_MAX_BYTES) { showError('Image too large (max 2MB)'); return }
+
+    const reader = new FileReader()
+    reader.onload = (ev) => {
+      const dataUrl = ev.target?.result as string
+      setPendingImage({ dataUrl, mimeType: file.type, name: file.name })
+    }
+    reader.readAsDataURL(file)
+    // Reset input so same file can be picked again
+    e.target.value = ''
+  }, [showError])
+
+  // ── Send message (text or image) ──
   const sendMessage = useCallback(async () => {
-    if (!newMessage.trim() || !currentSession || isSending) return
+    if ((!newMessage.trim() && !pendingImage) || !currentSession || isSending) return
+
+    const imagePayload = pendingImage
+    const textContent = newMessage.trim()
+    const content = imagePayload ? encodeImageMessage(imagePayload.dataUrl, imagePayload.mimeType) : textContent
 
     if (currentSession.mode === 'host') {
       const hosted = await offlineApi.getHostedSession().catch(() => null)
       if (!hosted || hosted.participantPeerIds.length === 0) {
-        setMessages(prev => [...prev, {
-          id: `wait-${Date.now()}`,
-          sender: 'System',
-          role: 'system',
-          content: 'WAITING FOR FRIEND TO JOIN · Share the session code above',
-          timestamp: new Date(),
-          isOwn: false,
-          system: true
-        }])
+        injectSystemMsg(`wait-${Date.now()}`, 'WAITING FOR FRIEND TO JOIN · Share the session code above')
         return
       }
-      // Send to all participants
-      const content = newMessage.trim()
-      setNewMessage('')
-      setIsSending(true)
+      setNewMessage(''); setPendingImage(null); setIsSending(true)
       try {
         const snap = await loadSnapshot(false)
         const peers = snap?.peers.filter(p => hosted.participantPeerIds.includes(p.id)) ?? []
         await Promise.allSettled(peers.map(p => offlineApi.sendMessage(p.id, content, currentSession.code)))
         addLog(`Broadcast sent to ${peers.length} participant(s)`)
-        // Optimistic add
-        setMessages(prev => [...prev, {
-          id: `local-${Date.now()}`,
+
+        const optId = `local-${Date.now()}`
+        const parsed = parseMessageContent(content)
+        const optMsg: Message = {
+          id: optId,
           sender: snap?.profile?.displayName ?? 'You',
           role: inferRole(snap?.profile?.displayName ?? 'You'),
-          content,
-          timestamp: new Date(),
-          isOwn: true,
-          encrypted: true,
-          delivered: true,
-          failed: false
-        }])
-      } catch (e) {
-        showError(`Send failed: ${getErrorMessage(e)}`)
-      } finally {
-        await refreshCurrentSession(currentSession).catch(() => undefined)
-        setIsSending(false)
-        inputRef.current?.focus()
-      }
+          content: parsed.text ?? '',
+          imageData: parsed.imageData,
+          imageType: parsed.imageType,
+          timestamp: new Date(), isOwn: true, encrypted: true, delivered: true, failed: false
+        }
+        knownMessageIdsRef.current.add(optId)
+        setMessages(prev => dedupeMessages([...prev, optMsg]))
+      } catch (e) { showError(`Send failed: ${getErrorMessage(e)}`) }
+      finally { await refreshCurrentSession(currentSession).catch(() => undefined); setIsSending(false); inputRef.current?.focus() }
       return
     }
 
-    const content = newMessage.trim()
-    setNewMessage('')
-    setIsSending(true)
+    setNewMessage(''); setPendingImage(null); setIsSending(true)
     const optimisticId = `local-${Date.now()}`
-
-    setMessages(prev => [...prev, {
+    const parsed = parseMessageContent(content)
+    const optMsg: Message = {
       id: optimisticId,
       sender: profile?.displayName ?? 'You',
       role: inferRole(profile?.displayName ?? 'You'),
-      content,
-      timestamp: new Date(),
-      isOwn: true,
-      encrypted: true,
-      delivered: false,
-      failed: false
-    }])
+      content: parsed.text ?? '',
+      imageData: parsed.imageData,
+      imageType: parsed.imageType,
+      timestamp: new Date(), isOwn: true, encrypted: true, delivered: false, failed: false
+    }
+    knownMessageIdsRef.current.add(optimisticId)
+    setMessages(prev => dedupeMessages([...prev, optMsg]))
 
     try {
       if (broadcastMode) {
         await Promise.allSettled(peerRecords.filter(p => p.status === 'online').map(p => offlineApi.sendMessage(p.id, content, currentSession.code)))
-        addLog(`Broadcast sent`)
+        addLog('Broadcast sent')
       } else {
         await offlineApi.sendMessage(currentSession.peerId, content, currentSession.code)
         addLog(`Message sent to ${currentSession.peerDisplayName}`)
@@ -1023,29 +963,54 @@ export default function Chat() {
       setMessages(prev => prev.map(m => m.id === optimisticId ? { ...m, delivered: false, failed: true } : m))
     } finally {
       await refreshCurrentSession(currentSession).catch(() => undefined)
-      setIsSending(false)
-      inputRef.current?.focus()
+      setIsSending(false); inputRef.current?.focus()
     }
-  }, [addLog, broadcastMode, currentSession, isSending, loadSnapshot, newMessage, peerRecords, profile, refreshCurrentSession, showError])
+  }, [addLog, broadcastMode, currentSession, injectSystemMsg, isSending, loadSnapshot, newMessage, pendingImage, peerRecords, profile, refreshCurrentSession, showError])
 
   const handleKey = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void sendMessage() }
   }
 
+  // Filter messages — also filter out system kick/host-closed messages if they contain internal protocols
   const filteredMessages = useMemo(() => messages.filter(m => {
+    // Hide internal system protocol messages from display
+    if (m.system && (m.content.startsWith('__SYS__:') || m.content.startsWith('__IMG__:'))) return false
     if (filter === 'teacher') return m.role === 'teacher' || m.system
     if (filter === 'student') return m.role === 'student' || m.system
     return true
   }), [filter, messages])
 
   // ==================== RENDER ====================
-
   return (
     <div className="cr">
-
       {/* ── ERROR TOAST ── */}
-      {error && (
-        <div className="toast-err">{error}</div>
+      {error && <div className="toast-err">{error}</div>}
+
+      {/* ── IMAGE PREVIEW MODAL ── */}
+      {showImagePreview && (
+        <div className="modal-overlay" onClick={() => setShowImagePreview(null)}>
+          <div className="img-preview-box" onClick={e => e.stopPropagation()}>
+            <img src={showImagePreview} alt="Preview" className="img-preview-img" />
+            <button className="modal-close" onClick={() => setShowImagePreview(null)}>×</button>
+          </div>
+        </div>
+      )}
+
+      {/* ── KICK CONFIRM ── */}
+      {kickConfirm && (
+        <div className="modal-overlay" onClick={() => setKickConfirm(null)}>
+          <div className="modal-box" style={{ maxWidth: 360 }} onClick={e => e.stopPropagation()}>
+            <div className="modal-title">REMOVE PARTICIPANT</div>
+            <div className="modal-sub" style={{ marginBottom: 16 }}>
+              Remove <strong>{kickConfirm.name}</strong> from this session?
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button className="btn-join" style={{ flex: 1, background: '#4a1a1a', borderColor: '#c86060' }} onClick={() => kickParticipant(kickConfirm)}>REMOVE</button>
+              <button className="btn-join" style={{ flex: 1, background: 'none', border: '1px solid #333' }} onClick={() => setKickConfirm(null)}>CANCEL</button>
+            </div>
+            <button className="modal-close" onClick={() => setKickConfirm(null)}>×</button>
+          </div>
+        </div>
       )}
 
       {/* ── PERMISSION PROMPT ── */}
@@ -1054,7 +1019,7 @@ export default function Chat() {
           <div className="modal-box" onClick={e => e.stopPropagation()}>
             <div className="modal-title">NEARBY SCAN PERMISSION</div>
             <div className="modal-sub" style={{ marginBottom: 16 }}>
-              ED-DESK needs permission to scan for nearby devices on your local LAN. This is required to discover peers running ED-DESK on the same Wi-Fi network.
+              ED-DESK needs permission to scan for nearby devices on your local LAN.
             </div>
             <div style={{ display: 'flex', gap: 8 }}>
               <button className="btn-join" style={{ flex: 1 }} onClick={grantPermission}>GRANT PERMISSION</button>
@@ -1073,50 +1038,26 @@ export default function Chat() {
             <div className="modal-sub">Others on the same LAN can scan or enter your session code to join</div>
             <div className="create-form">
               <label className="form-label">SESSION NAME</label>
-              <input
-                className="code-input"
-                style={{ letterSpacing: 'normal', textAlign: 'left', fontSize: 11 }}
+              <input className="code-input" style={{ letterSpacing: 'normal', textAlign: 'left', fontSize: 11 }}
                 placeholder={`${profile?.displayName ?? 'My'} Session`}
-                value={createName}
-                onChange={e => setCreateName(e.target.value)}
-                maxLength={40}
-              />
+                value={createName} onChange={e => setCreateName(e.target.value)} maxLength={40} />
               <label className="form-label">DESCRIPTION (optional)</label>
-              <input
-                className="code-input"
-                style={{ letterSpacing: 'normal', textAlign: 'left', fontSize: 11 }}
+              <input className="code-input" style={{ letterSpacing: 'normal', textAlign: 'left', fontSize: 11 }}
                 placeholder="What is this session for?"
-                value={createDesc}
-                onChange={e => setCreateDesc(e.target.value)}
-                maxLength={100}
-              />
+                value={createDesc} onChange={e => setCreateDesc(e.target.value)} maxLength={100} />
               <label className="form-label">VISIBILITY</label>
               <div className="vis-row">
-                <button
-                  className={`vis-btn ${createVisibility === 'public' ? 'vis-active' : ''}`}
-                  onClick={() => setCreateVisibility('public')}
-                >PUBLIC · Anyone on LAN can join</button>
-                <button
-                  className={`vis-btn ${createVisibility === 'private' ? 'vis-active' : ''}`}
-                  onClick={() => setCreateVisibility('private')}
-                >PRIVATE · Requires password</button>
+                <button className={`vis-btn ${createVisibility === 'public' ? 'vis-active' : ''}`} onClick={() => setCreateVisibility('public')}>PUBLIC · Anyone on LAN can join</button>
+                <button className={`vis-btn ${createVisibility === 'private' ? 'vis-active' : ''}`} onClick={() => setCreateVisibility('private')}>PRIVATE · Requires password</button>
               </div>
               {createVisibility === 'private' && (
                 <>
                   <label className="form-label">PASSWORD</label>
-                  <input
-                    type="password"
-                    className="code-input"
-                    style={{ letterSpacing: 'normal', textAlign: 'left', fontSize: 11 }}
-                    placeholder="Session password"
-                    value={createPassword}
-                    onChange={e => setCreatePassword(e.target.value)}
-                  />
+                  <input type="password" className="code-input" style={{ letterSpacing: 'normal', textAlign: 'left', fontSize: 11 }}
+                    placeholder="Session password" value={createPassword} onChange={e => setCreatePassword(e.target.value)} />
                 </>
               )}
-              <button className="btn-join" style={{ marginTop: 8 }} onClick={createSession}>
-                CREATE SESSION
-              </button>
+              <button className="btn-join" style={{ marginTop: 8 }} onClick={createSession}>CREATE SESSION</button>
             </div>
             <button className="modal-close" onClick={() => setShowCreateModal(false)}>×</button>
           </div>
@@ -1127,9 +1068,7 @@ export default function Chat() {
       <aside className="sb">
         <div className="sb-hdr">
           <span className="sb-title">CHAT SESSIONS</span>
-          <div className="sb-hdr-r">
-            <span className="sb-time">{fmtShort(time)}</span>
-          </div>
+          <div className="sb-hdr-r"><span className="sb-time">{fmtShort(time)}</span></div>
         </div>
 
         {currentSession ? (
@@ -1158,9 +1097,12 @@ export default function Chat() {
               <div className="ss"><span>ENCRYPT</span><span className="enc-on">AES-256</span></div>
             </div>
             <div className="s-actions">
-              <button className="btn-panel" onClick={() => setShowParticipants(p => !p)}>USERS ({participants.length})</button>
+              <button className="btn-panel" onClick={() => setShowParticipants(p => !p)}>
+                USERS ({participants.length})
+              </button>
               <button className="btn-panel" onClick={() => setShowNetworkPanel(p => !p)}>NODES</button>
             </div>
+
             {showParticipants && (
               <div className="sub-panel">
                 <div className="sp-title">PARTICIPANTS</div>
@@ -1172,10 +1114,15 @@ export default function Chat() {
                       <span className="p-role">{p.role.toUpperCase()}</span>
                     </div>
                     <span className="p-ip">{p.ipAddress}</span>
+                    {/* Show kick button only for host, and not for self */}
+                    {currentSession.mode === 'host' && p.id !== (profile?.peerId ?? 'local') && (
+                      <button className="kick-btn" title="Remove from session" onClick={() => setKickConfirm(p)}>✕</button>
+                    )}
                   </div>
                 ))}
               </div>
             )}
+
             {showNetworkPanel && (
               <div className="sub-panel">
                 <div className="sp-title">NETWORK NODES</div>
@@ -1195,6 +1142,19 @@ export default function Chat() {
             <div className="no-sess-icon">⬡</div>
             <p>No active session</p>
             <p className="hint">Create or scan to join</p>
+
+            {/* Show active sessions from network */}
+            {activeSessions.length > 0 && (
+              <div className="active-sess-list">
+                <div className="sp-title" style={{ margin: '12px 0 6px' }}>ACTIVE ON LAN</div>
+                {activeSessions.map(sess => (
+                  <div key={sess.code} className="active-sess-item" onClick={() => joinByCode(sess.code)}>
+                    <div className="asi-name">{sess.name}</div>
+                    <div className="asi-code">{sess.code}</div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
@@ -1234,6 +1194,7 @@ export default function Chat() {
                   {currentSession.encrypted && <span className="ch-enc">SECURE</span>}
                   {broadcastMode && <span className="ch-bcast">BROADCAST</span>}
                   {currentSession.mode === 'host' && <span className="ch-host">HOST</span>}
+                  {currentSession.status === 'stale' && <span className="ch-stale">DISCONNECTED</span>}
                 </div>
               </div>
               <div className="ch-r">
@@ -1281,11 +1242,22 @@ export default function Chat() {
                           </div>
                         )}
                         <div className={`msg-bub ${msg.isOwn ? 'bub-own' : ''}`}>
-                          <div className="msg-cnt">{msg.content}</div>
+                          {msg.imageData ? (
+                            <div className="msg-img-wrap">
+                              <img
+                                src={msg.imageData}
+                                alt="Shared image"
+                                className="msg-img"
+                                onClick={() => setShowImagePreview(msg.imageData!)}
+                              />
+                            </div>
+                          ) : (
+                            <div className="msg-cnt">{msg.content}</div>
+                          )}
                           <div className="msg-foot">
                             <span className="msg-ts">{fmt(msg.timestamp)}</span>
                             {msg.isOwn && (
-                              <span className="msg-st">{msg.failed ? 'FAILED' : msg.delivered ? 'SENT' : 'PEND'}</span>
+                              <span className="msg-st">{msg.failed ? '✗ FAILED' : msg.delivered ? '✓ SENT' : '○ PEND'}</span>
                             )}
                           </div>
                         </div>
@@ -1342,6 +1314,9 @@ export default function Chat() {
                       <div className="dc-row"><span>IP</span><span>{p.ipAddress}</span></div>
                       <div className="dc-row"><span>DEVICE</span><span>{p.device}</span></div>
                       <div className="dc-row"><span>STATUS</span><span>{p.status.toUpperCase()}</span></div>
+                      {currentSession.mode === 'host' && p.id !== (profile?.peerId ?? 'local') && (
+                        <button className="kick-btn-card" onClick={() => setKickConfirm(p)}>REMOVE</button>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -1362,6 +1337,16 @@ export default function Chat() {
                 {broadcastMode && (
                   <div className="bcast-banner">BROADCAST MODE · Message will be sent to all available peers</div>
                 )}
+
+                {/* Pending image preview */}
+                {pendingImage && (
+                  <div className="pending-img-row">
+                    <img src={pendingImage.dataUrl} alt="Pending" className="pending-img-thumb" />
+                    <span className="pending-img-name">{pendingImage.name}</span>
+                    <button className="pending-img-remove" onClick={() => setPendingImage(null)}>✕</button>
+                  </div>
+                )}
+
                 <div className="inp-row">
                   <div className="inp-pfx">&gt;</div>
                   <input
@@ -1370,11 +1355,9 @@ export default function Chat() {
                     placeholder={
                       currentSession.mode === 'host' && participants.length <= 1
                         ? `Waiting for friend to join (code: ${currentSession.code})...`
-                        : broadcastMode
-                          ? 'Broadcast message...'
-                          : currentSession.mode === 'peer'
-                            ? `Message ${currentSession.peerDisplayName}...`
-                            : 'Type a message... (Enter to send)'
+                        : broadcastMode ? 'Broadcast message...'
+                        : currentSession.mode === 'peer' ? `Message ${currentSession.peerDisplayName}...`
+                        : 'Type a message... (Enter to send)'
                     }
                     value={newMessage}
                     onChange={e => setNewMessage(e.target.value)}
@@ -1382,7 +1365,23 @@ export default function Chat() {
                     disabled={isSending}
                   />
                   <span className="inp-cnt">{newMessage.length}</span>
-                  <button className="btn-send" onClick={sendMessage} disabled={!newMessage.trim() || isSending}>
+
+                  {/* Image attach button */}
+                  <button
+                    className="btn-attach"
+                    title="Attach image"
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={isSending}
+                  >📎</button>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="image/*"
+                    style={{ display: 'none' }}
+                    onChange={handleFileSelect}
+                  />
+
+                  <button className="btn-send" onClick={sendMessage} disabled={(!newMessage.trim() && !pendingImage) || isSending}>
                     {isSending ? '...' : 'SEND'}
                   </button>
                 </div>
@@ -1390,6 +1389,7 @@ export default function Chat() {
                   <span>SESSION · {currentSession.code}</span>
                   <span>{currentSession.encrypted ? 'AES-256-GCM ENCRYPTED' : 'UNENCRYPTED'}</span>
                   <span>{participants.filter(p => p.status === 'online').length} ONLINE</span>
+                  <span>Images up to 2MB</span>
                 </div>
               </div>
             )}
@@ -1397,11 +1397,7 @@ export default function Chat() {
         ) : (
           <div className="welcome">
             <div className="w-ascii-header">
-              <pre className="w-glitch">{`   ____ _   _    _  _____
-  / ___| | | |  / \\|_   _|
- | |   | |_| | / _ \\ | |
- | |___|  _  |/ ___ \\| |
-  \\____|_| |_/_/   \\_\\_|`}</pre>
+              <pre className="w-glitch">{`   ____ _   _    _  _____\n  / ___| | | |  / \\|_   _|\n | |   | |_| | / _ \\ | |\n | |___|  _  |/ ___ \\| |\n  \\____|_| |_/_/   \\_\\_|`}</pre>
               <div className="w-header-info">
                 <span className="w-version">v1.0.0</span>
                 <span className="w-time">{fmtShort(time)}</span>
@@ -1423,6 +1419,28 @@ export default function Chat() {
                 ENTER CODE
               </button>
             </div>
+
+            {/* Active sessions on LAN shown directly on welcome screen */}
+            {activeSessions.length > 0 && (
+              <div className="w-active-sessions">
+                <div className="w-active-title">ACTIVE SESSIONS ON LAN</div>
+                {activeSessions.map(sess => (
+                  <div key={sess.code} className="w-sess-item" onClick={() => joinByCode(sess.code)}>
+                    <div className="wsi-l">
+                      <div className="wsi-name">{sess.name}</div>
+                      <div className="wsi-meta">{sess.code} · {sess.peerDisplayName}</div>
+                    </div>
+                    <div className="wsi-r">
+                      <span className={`si-badge ${sess.encrypted ? 'badge-priv' : 'badge-pub'}`}>
+                        {sess.encrypted ? '🔒' : 'PUBLIC'}
+                      </span>
+                      <span className="join-hint">JOIN →</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
             <div className="w-info">
               <div className="wi-row"><span>ENCRYPTION</span><span>AES-256-GCM</span></div>
               <div className="wi-row"><span>NETWORK</span><span>LOCAL LAN · Wi-Fi</span></div>
@@ -1464,22 +1482,12 @@ export default function Chat() {
 
             <div className="modal-div"><span>ENTER CODE MANUALLY</span></div>
             <div className="manual-join">
-              <input
-                className="code-input"
-                placeholder="SESSION CODE"
-                value={joinCode}
-                onChange={e => setJoinCode(e.target.value.toUpperCase())}
-                maxLength={10}
-              />
+              <input className="code-input" placeholder="SESSION CODE"
+                value={joinCode} onChange={e => setJoinCode(e.target.value.toUpperCase())} maxLength={10} />
               {nearbySessions.find(s => s.code === joinCode)?.encrypted && (
-                <input
-                  type="password"
-                  className="code-input"
+                <input type="password" className="code-input"
                   style={{ letterSpacing: 'normal', fontSize: 11, textAlign: 'left' }}
-                  placeholder="PASSWORD"
-                  value={joinPassword}
-                  onChange={e => setJoinPassword(e.target.value)}
-                />
+                  placeholder="PASSWORD" value={joinPassword} onChange={e => setJoinPassword(e.target.value)} />
               )}
               <button className="btn-join" onClick={() => joinByCode(joinCode, joinPassword || undefined)} disabled={!joinCode}>
                 JOIN
@@ -1500,16 +1508,9 @@ export default function Chat() {
         * { scrollbar-width:thin; scrollbar-color:#222 #111; }
 
         .cr {
-          display:flex;
-          height:100%;
-          min-height:calc(100vh - 120px);
-          width:100%;
-          overflow:hidden;
-          background:#030303;
-          color:#fff;
-          font-family:'SF Mono','Monaco','Fira Code',monospace;
-          font-size:11px;
-          position:relative;
+          display:flex; height:100%; min-height:calc(100vh - 120px);
+          width:100%; overflow:hidden; background:#030303; color:#fff;
+          font-family:'SF Mono','Monaco','Fira Code',monospace; font-size:11px; position:relative;
         }
 
         /* Toast */
@@ -1529,7 +1530,8 @@ export default function Chat() {
         }
         .sb-hdr {
           display:flex; justify-content:space-between; align-items:center;
-          padding:12px 14px; border-bottom:1px solid #1e3a5f; background:#060606; flex-shrink:0;
+          padding:12px 14px; border-bottom:1px solid #1e3a5f;
+          background:#060606; flex-shrink:0;
         }
         .sb-title { font-size:9px; letter-spacing:1.5px; opacity:0.55; }
         .sb-hdr-r { display:flex; align-items:center; gap:8px; }
@@ -1546,16 +1548,12 @@ export default function Chat() {
         .badge-bcast { background:rgba(74,144,217,0.2); border:1px solid #1e3a5f; }
         .badge-warn { background:rgba(200,80,80,0.3); border:1px solid #c86060; color:#ff9a9a; }
 
-        /* Host share box */
         .host-share-box {
           background:#0d1a2a; border:1px solid #1e3a5f; padding:10px 12px;
           margin-bottom:8px; text-align:center;
         }
         .host-share-label { font-size:7px; opacity:0.45; letter-spacing:1px; margin-bottom:4px; }
-        .host-share-code {
-          font-size:24px; font-weight:700; letter-spacing:6px;
-          color:#6ab4ff; text-shadow:0 0 12px rgba(106,180,255,0.4);
-        }
+        .host-share-code { font-size:24px; font-weight:700; letter-spacing:6px; color:#6ab4ff; text-shadow:0 0 12px rgba(106,180,255,0.4); }
         .host-share-hint { font-size:7px; opacity:0.35; margin-top:5px; font-style:italic; }
 
         .s-desc { font-size:8px; opacity:0.35; margin-bottom:8px; font-style:italic; }
@@ -1587,10 +1585,28 @@ export default function Chat() {
         .p-dot.online { background:#4a90d9; }
         .p-dot.away   { background:#888; animation:blink 1.2s infinite; }
         .p-dot.offline { background:#333; }
-        .p-inf { flex:1; }
-        .p-name { display:block; font-size:9px; }
+        .p-inf { flex:1; min-width:0; }
+        .p-name { display:block; font-size:9px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
         .p-role { font-size:7px; opacity:0.3; }
         .p-ip { font-size:7px; opacity:0.25; font-family:monospace; }
+
+        /* Kick button in participant list */
+        .kick-btn {
+          background:none; border:1px solid rgba(200,80,80,0.3); color:#c86060;
+          padding:1px 5px; font-size:9px; cursor:pointer; font-family:inherit;
+          transition:all 0.15s; flex-shrink:0;
+        }
+        .kick-btn:hover { background:rgba(200,80,80,0.2); border-color:#c86060; }
+
+        /* Kick button in network card */
+        .kick-btn-card {
+          width:100%; margin-top:6px; background:none;
+          border:1px solid rgba(200,80,80,0.3); color:#c86060;
+          padding:3px 0; font-size:7px; cursor:pointer; font-family:inherit;
+          letter-spacing:1px; transition:all 0.15s;
+        }
+        .kick-btn-card:hover { background:rgba(200,80,80,0.15); border-color:#c86060; }
+
         .n-row { display:flex; align-items:center; gap:6px; padding:3px 0; font-size:8px; }
         .n-dot { width:5px; height:5px; border-radius:50%; }
         .n-dot.connected { background:#4a90d9; }
@@ -1600,10 +1616,20 @@ export default function Chat() {
         .n-lat { opacity:0.4; }
         @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.2} }
 
-        .no-sess { padding:24px 14px; text-align:center; flex-shrink:0; }
+        .no-sess { padding:18px 14px; text-align:center; flex-shrink:0; }
         .no-sess-icon { font-size:22px; opacity:0.1; margin-bottom:6px; }
         .no-sess p { opacity:0.35; font-size:10px; }
         .hint { font-size:8px; opacity:0.2; margin-top:3px; }
+
+        /* Active sessions in sidebar */
+        .active-sess-list { text-align:left; margin-top:4px; }
+        .active-sess-item {
+          padding:6px 10px; border:1px solid #1e3a5f; margin-bottom:4px;
+          cursor:pointer; transition:background 0.15s; background:#0a0a0a;
+        }
+        .active-sess-item:hover { background:#111; }
+        .asi-name { font-size:9px; }
+        .asi-code { font-size:7px; opacity:0.4; font-family:monospace; }
 
         /* Quick actions */
         .qa { margin-top:auto; padding:10px 14px; border-top:1px solid #1e3a5f; flex-shrink:0; }
@@ -1621,10 +1647,7 @@ export default function Chat() {
         .qa-badge { font-size:6px; padding:1px 4px; border-radius:1px; font-weight:700; flex-shrink:0; }
 
         /* Main */
-        .cm {
-          flex:1; display:flex; flex-direction:column;
-          background:#030303; overflow:hidden; min-width:0; width:100%;
-        }
+        .cm { flex:1; display:flex; flex-direction:column; background:#030303; overflow:hidden; min-width:0; width:100%; }
 
         /* Chat header */
         .ch {
@@ -1638,6 +1661,7 @@ export default function Chat() {
         .ch-enc  { color:#6ab4ff; border:1px solid rgba(106,180,255,0.2); padding:1px 5px; font-size:7px; }
         .ch-bcast { color:#ffd700; border:1px solid rgba(255,215,0,0.2); padding:1px 5px; font-size:7px; }
         .ch-host  { color:#4a90d9; border:1px solid rgba(74,144,217,0.3); padding:1px 5px; font-size:7px; }
+        .ch-stale { color:#ff9a9a; border:1px solid rgba(200,80,80,0.3); padding:1px 5px; font-size:7px; animation:blink 1.5s infinite; }
         .ch-r { display:flex; gap:14px; flex-shrink:0; }
         .ch-stat { display:flex; flex-direction:column; align-items:flex-end; font-size:8px; }
         .ch-stat span:first-child { opacity:0.3; font-size:7px; }
@@ -1666,10 +1690,15 @@ export default function Chat() {
 
         /* Messages */
         .msgs {
-          flex:1; overflow-y:auto; padding:14px 18px;
+          flex:1; overflow-y:auto; overflow-x:hidden; padding:14px 18px;
           display:flex; flex-direction:column; gap:8px; min-height:0;
+          scrollbar-width:thin; scrollbar-color:#1e3a5f #050505;
         }
-        .mw { display:flex; flex-direction:column; align-items:flex-start; max-width:min(70%, 560px); }
+        .msgs::-webkit-scrollbar { width:10px; }
+        .msgs::-webkit-scrollbar-track { background:#050505; }
+        .msgs::-webkit-scrollbar-thumb { background:#1e3a5f; border-radius:8px; border:2px solid #050505; }
+        .msgs::-webkit-scrollbar-thumb:hover { background:#2a4a7a; }
+        .mw { display:flex; flex-direction:column; align-items:flex-start; max-width:min(72%, 600px); }
         .mw-own { align-self:flex-end; align-items:flex-end; }
         .mw-sys { align-self:center; max-width:100%; }
         .msg-sys {
@@ -1691,6 +1720,32 @@ export default function Chat() {
         .msg-foot { display:flex; justify-content:flex-end; align-items:center; gap:5px; margin-top:3px; }
         .msg-ts { font-size:7px; opacity:0.35; }
         .msg-st { font-size:8px; opacity:0.5; }
+
+        /* Image messages */
+        .msg-img-wrap { max-width:320px; cursor:pointer; }
+        .msg-img { max-width:100%; max-height:240px; display:block; border-radius:2px; object-fit:contain; }
+        .msg-img:hover { opacity:0.9; }
+
+        /* Image preview modal */
+        .img-preview-box {
+          position:relative; max-width:90vw; max-height:90vh;
+          background:#0a0a0a; border:1px solid #1e3a5f; padding:8px;
+        }
+        .img-preview-img { max-width:100%; max-height:80vh; display:block; object-fit:contain; }
+
+        /* Pending image */
+        .pending-img-row {
+          display:flex; align-items:center; gap:8px; padding:6px 10px;
+          background:#0a1628; border:1px solid #1e3a5f; margin-bottom:6px; border-radius:2px;
+        }
+        .pending-img-thumb { width:36px; height:36px; object-fit:cover; border-radius:2px; }
+        .pending-img-name { flex:1; font-size:9px; opacity:0.6; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .pending-img-remove {
+          background:none; border:none; color:#ff9a9a; font-size:14px; cursor:pointer;
+          opacity:0.6; padding:0 4px; line-height:1;
+        }
+        .pending-img-remove:hover { opacity:1; }
+
         .typing-row { display:flex; align-items:center; gap:5px; font-size:8px; opacity:0.3; }
         .typing-dot { animation:blink 1s infinite; }
 
@@ -1732,10 +1787,7 @@ export default function Chat() {
 
         /* Input */
         .inp-area { border-top:1px solid #1e3a5f; padding:10px 18px; background:#060606; flex-shrink:0; }
-        .bcast-banner {
-          font-size:7px; color:#ffd700; border:1px solid rgba(255,215,0,0.18);
-          background:rgba(255,215,0,0.04); padding:3px 8px; margin-bottom:6px;
-        }
+        .bcast-banner { font-size:7px; color:#ffd700; border:1px solid rgba(255,215,0,0.18); background:rgba(255,215,0,0.04); padding:3px 8px; margin-bottom:6px; }
         .inp-row { display:flex; align-items:center; gap:7px; margin-bottom:5px; }
         .inp-pfx { font-size:13px; opacity:0.3; flex-shrink:0; }
         .msg-inp {
@@ -1746,6 +1798,12 @@ export default function Chat() {
         .msg-inp::placeholder { opacity:0.25; }
         .msg-inp:disabled { opacity:0.4; }
         .inp-cnt { font-size:8px; opacity:0.2; min-width:22px; text-align:right; flex-shrink:0; }
+        .btn-attach {
+          background:#111; border:1px solid #1e3a5f; color:#fff;
+          padding:8px 10px; font-size:13px; cursor:pointer; transition:background 0.2s; flex-shrink:0;
+        }
+        .btn-attach:hover:not(:disabled) { background:#1e3a5f; }
+        .btn-attach:disabled { opacity:0.28; cursor:not-allowed; }
         .btn-send {
           background:#1e3a5f; border:none; color:#fff; padding:8px 18px;
           font-size:9px; cursor:pointer; font-family:inherit; letter-spacing:1px;
@@ -1759,62 +1817,28 @@ export default function Chat() {
         .welcome {
           flex:1; display:flex; flex-direction:column; align-items:center;
           justify-content:center; padding:40px 24px; text-align:center; overflow-y:auto; overflow-x:hidden;
-          background:
-            radial-gradient(circle at top, rgba(30,58,95,0.18), transparent 42%),
+          gap:0;
+          background:radial-gradient(circle at top, rgba(30,58,95,0.18), transparent 42%),
             linear-gradient(180deg, #05080d 0%, #030303 48%, #030303 100%);
         }
-        .welcome > * {
-          width:100%;
-          max-width:560px;
-          margin-left:auto;
-          margin-right:auto;
-        }
+        .welcome > * { width:100%; max-width:560px; margin-left:auto; margin-right:auto; }
         .w-ascii-header {
-          background:#050a14;
-          border-bottom:1px solid #1e3a5f;
-          padding:14px 20px;
-          display:flex;
-          justify-content:space-between;
-          align-items:center;
-          gap:16px;
-          flex-shrink:0;
-          width:100%;
-          margin-bottom:18px;
-          text-align:left;
+          background:#050a14; border-bottom:1px solid #1e3a5f; padding:14px 20px;
+          display:flex; justify-content:space-between; align-items:center;
+          gap:16px; flex-shrink:0; width:100%; margin-bottom:18px; text-align:left;
         }
         .w-glitch {
-          color:#94b8ff;
-          font-size:9px;
-          line-height:1.25;
-          text-shadow:0 0 18px rgba(148,184,255,0.35);
-          white-space:pre;
-          letter-spacing:0.5px;
-          margin:0;
-          overflow-x:auto;
+          color:#94b8ff; font-size:9px; line-height:1.25; text-shadow:0 0 18px rgba(148,184,255,0.35);
+          white-space:pre; letter-spacing:0.5px; margin:0; overflow-x:auto;
         }
         .w-header-info {
-          display:flex;
-          gap:14px;
-          align-items:center;
-          background:#0a1628;
-          padding:8px 14px;
-          border:1px solid #1e3a5f;
-          flex-shrink:0;
-          min-width:0;
+          display:flex; gap:14px; align-items:center; background:#0a1628; padding:8px 14px;
+          border:1px solid #1e3a5f; flex-shrink:0; min-width:0;
         }
         .w-version { font-size:9px; color:#4a7abf; }
         .w-time { font-size:13px; font-weight:600; color:#e8f0ff; letter-spacing:1px; }
         .w-log-box { border-left:1px solid #1e3a5f; padding-left:12px; min-width:0; }
-        .w-log-msg {
-          font-size:9px;
-          color:#94b8ff;
-          opacity:0.75;
-          display:block;
-          white-space:nowrap;
-          overflow:hidden;
-          text-overflow:ellipsis;
-          max-width:180px;
-        }
+        .w-log-msg { font-size:9px; color:#94b8ff; opacity:0.75; display:block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:180px; }
         .w-sub { font-size:9px; opacity:0.48; line-height:1.8; margin-bottom:24px; max-width:420px; }
         .w-actions { display:flex; gap:10px; margin-bottom:22px; flex-wrap:wrap; justify-content:center; align-items:center; }
         .wbtn {
@@ -1826,23 +1850,36 @@ export default function Chat() {
         .wprimary:hover { background:#2a4a7a; }
         .wsecondary:hover { background:rgba(30,58,95,0.2); }
         .wbtn:disabled { opacity:0.35; cursor:not-allowed; }
+
+        /* Active sessions on welcome screen */
+        .w-active-sessions {
+          border:1px solid #1e3a5f; background:#070707; margin-bottom:18px;
+          width:min(100%, 520px);
+        }
+        .w-active-title { font-size:7px; letter-spacing:1.5px; opacity:0.35; padding:8px 14px; border-bottom:1px solid #1e3a5f; }
+        .w-sess-item {
+          display:flex; justify-content:space-between; align-items:center;
+          padding:10px 14px; border-bottom:1px solid #0d0d0d; cursor:pointer; transition:background 0.15s;
+        }
+        .w-sess-item:last-child { border-bottom:none; }
+        .w-sess-item:hover { background:#111; }
+        .wsi-l { text-align:left; }
+        .wsi-name { font-size:10px; }
+        .wsi-meta { font-size:7px; opacity:0.4; margin-top:2px; }
+        .wsi-r { display:flex; align-items:center; gap:8px; }
+        .join-hint { font-size:8px; color:#4a90d9; }
+
         .w-info { background:#0a0a0a; border:1px solid #1e3a5f; padding:12px 22px; width:min(100%, 420px); min-width:0; }
         .wi-row { display:flex; justify-content:space-between; font-size:8px; padding:4px 0; border-bottom:1px dotted #111; gap:40px; }
         .wi-row span:first-child { opacity:0.35; }
 
         /* Modal */
         .modal-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.92); display:flex; align-items:center; justify-content:center; z-index:2000; }
-        .modal-box {
-          background:#0a0a0a; border:1px solid #1e3a5f; padding:22px;
-          width:500px; max-width:94vw; max-height:82vh; overflow-y:auto; position:relative;
-        }
+        .modal-box { background:#0a0a0a; border:1px solid #1e3a5f; padding:22px; width:500px; max-width:94vw; max-height:82vh; overflow-y:auto; position:relative; }
         .modal-title { font-size:12px; letter-spacing:2px; margin-bottom:3px; }
         .modal-sub { font-size:8px; opacity:0.35; margin-bottom:14px; }
         .sess-list { border:1px solid #1e3a5f; max-height:240px; overflow-y:auto; margin-bottom:12px; }
-        .sess-item {
-          display:flex; justify-content:space-between; align-items:center;
-          padding:10px 12px; border-bottom:1px solid #0d0d0d; cursor:pointer; transition:background 0.15s;
-        }
+        .sess-item { display:flex; justify-content:space-between; align-items:center; padding:10px 12px; border-bottom:1px solid #0d0d0d; cursor:pointer; transition:background 0.15s; }
         .sess-item:hover { background:#111; }
         .si-name { font-size:10px; margin-bottom:2px; }
         .si-code { font-size:8px; opacity:0.35; font-family:monospace; margin-bottom:1px; }
@@ -1855,40 +1892,26 @@ export default function Chat() {
         .modal-div::before { left:0; }
         .modal-div::after { right:0; }
         .manual-join { display:flex; flex-direction:column; gap:7px; }
-        .code-input {
-          background:#0e0e0e; border:1px solid #1e3a5f; color:#fff;
-          padding:9px 12px; font-size:13px; font-family:monospace;
-          letter-spacing:4px; text-align:center; outline:none; width:100%;
-        }
+        .code-input { background:#0e0e0e; border:1px solid #1e3a5f; color:#fff; padding:9px 12px; font-size:13px; font-family:monospace; letter-spacing:4px; text-align:center; outline:none; width:100%; }
         .code-input:focus { border-color:#fff; }
-        .btn-join {
-          width:100%; background:#1e3a5f; border:none; color:#fff; padding:9px;
-          font-size:9px; cursor:pointer; font-family:inherit; letter-spacing:1px; transition:background 0.2s;
-        }
+        .btn-join { width:100%; background:#1e3a5f; border:none; color:#fff; padding:9px; font-size:9px; cursor:pointer; font-family:inherit; letter-spacing:1px; transition:background 0.2s; }
         .btn-join:hover:not(:disabled) { background:#2a4a7a; }
         .btn-join:disabled { opacity:0.35; cursor:not-allowed; }
-        .modal-close {
-          position:absolute; top:10px; right:14px; background:none;
-          border:none; color:#fff; font-size:20px; cursor:pointer; opacity:0.3; line-height:1;
-        }
+        .modal-close { position:absolute; top:10px; right:14px; background:none; border:none; color:#fff; font-size:20px; cursor:pointer; opacity:0.3; line-height:1; }
         .modal-close:hover { opacity:1; }
 
         /* Create form */
         .create-form { display:flex; flex-direction:column; gap:7px; }
         .form-label { font-size:7px; opacity:0.45; letter-spacing:1px; margin-top:4px; }
         .vis-row { display:flex; gap:5px; }
-        .vis-btn {
-          flex:1; background:#0e0e0e; border:1px solid #1e3a5f; color:#fff;
-          padding:7px 6px; font-size:8px; cursor:pointer; font-family:inherit;
-          transition:all 0.15s; text-align:center; opacity:0.5;
-        }
+        .vis-btn { flex:1; background:#0e0e0e; border:1px solid #1e3a5f; color:#fff; padding:7px 6px; font-size:8px; cursor:pointer; font-family:inherit; transition:all 0.15s; text-align:center; opacity:0.5; }
         .vis-btn:hover { opacity:0.8; }
         .vis-btn.vis-active { opacity:1; background:rgba(30,58,95,0.4); border-color:#6ab4ff; }
 
         /* Responsive */
         @media(max-width:900px){.sb{width:220px;min-width:220px;}.net-grid,.dev-grid{grid-template-columns:repeat(2,1fr)}}
         @media(max-width:640px){
-          .welcome{padding:28px 16px;}
+          .welcome{justify-content:flex-start; padding:20px 14px;}
           .w-ascii-header{padding:12px 14px; flex-direction:column; align-items:flex-start;}
           .w-glitch{font-size:8px; letter-spacing:0.4px; width:100%;}
           .w-header-info{width:100%;}
@@ -1896,6 +1919,7 @@ export default function Chat() {
           .w-actions{flex-direction:column;}
           .wbtn{width:100%; max-width:320px;}
           .wi-row{gap:12px;}
+          .net-grid,.dev-grid,.stats-grid{grid-template-columns:repeat(2,1fr);}
         }
       `}</style>
     </div>
