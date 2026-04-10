@@ -51,6 +51,7 @@ export interface ChatMessageRecord {
   attachmentName?: string
   attachmentSize?: number
   attachmentMime?: string
+  attachmentData?: string
 }
 
 export interface AssessmentQuestion {

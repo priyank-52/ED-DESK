@@ -451,16 +451,25 @@ export class OfflineBackendService {
     response.end(JSON.stringify(payload))
   }
 
-  private async postJson<T>(peer: PeerRecord, path: string, payload: unknown): Promise<T> {
+  private async postJson<T>(
+    peer: PeerRecord,
+    path: string,
+    payload: unknown,
+    options?: { timeoutMs?: number }
+  ): Promise<T> {
     return await new Promise<T>((resolve, reject) => {
+      const body = JSON.stringify(payload)
       const request = http.request(
         {
           host: peer.address,
           port: peer.port,
           path,
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          timeout: 5000
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(body)
+          },
+          timeout: options?.timeoutMs ?? 7000
         },
         async (response) => {
           const chunks: Buffer[] = []
@@ -476,7 +485,7 @@ export class OfflineBackendService {
       )
       request.on('error', reject)
       request.on('timeout', () => { request.destroy(); reject(new Error('Request timed out')) })
-      request.write(JSON.stringify(payload))
+      request.write(body)
       request.end()
     })
   }
@@ -773,7 +782,15 @@ export class OfflineBackendService {
 
   getMessages(conversationId: string): ChatMessageRecord[] {
     this.database.markConversationRead(conversationId)
-    return this.database.listMessages(conversationId)
+    return this.database.listMessages(conversationId).map((message) => {
+      if (!message.attachmentId) return message
+      const attachment = this.database.getAttachment(message.attachmentId)
+      if (!attachment) return message
+      return {
+        ...message,
+        attachmentData: attachment.data
+      }
+    })
   }
 
   getAttachment(attachmentId: string): AttachmentRecord | undefined {
@@ -868,7 +885,11 @@ export class OfflineBackendService {
         payload.attachmentData = attachmentRecord.data // inline for LAN transfer
       }
 
-      await this.postJson(peer, '/api/peer/message', payload)
+      const timeoutMs = attachmentRecord
+        ? Math.min(45000, Math.max(15000, Math.ceil(Buffer.byteLength(attachmentRecord.data) / 250000) * 1000))
+        : 7000
+
+      await this.postJson(peer, '/api/peer/message', payload, { timeoutMs })
 
       const deliveredAt = Date.now()
       this.database.updateMessageStatus(pendingMessage.id, 'delivered', deliveredAt)

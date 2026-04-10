@@ -253,7 +253,7 @@ const buildHistorySession = (
   peerDisplayName: peer?.displayName ?? conv.peerName,
   mode: 'peer',
   participants: 2,
-  encrypted: peer?.hostedSession?.visibility === 'private' ?? false,
+  encrypted: peer?.hostedSession?.visibility === 'private',
   created: new Date(conv.updatedAt),
   description: peer?.hostedSession?.description || `Previous chat with ${conv.peerName}`,
   activeUsers: [myName, peer?.displayName ?? conv.peerName],
@@ -432,7 +432,7 @@ export default function Chat() {
         attachmentName: r.attachmentName,
         attachmentSize: r.attachmentSize,
         attachmentMime: legacyImage?.attachmentMime ?? r.attachmentMime,
-        attachmentData: legacyImage?.attachmentData
+        attachmentData: legacyImage?.attachmentData ?? r.attachmentData
       }
     },
     []
@@ -1128,8 +1128,9 @@ export default function Chat() {
       }
 
       setMessages((prev) =>
-        prev.map((m) => (m.id === optimisticId ? { ...m, delivered: true } : m))
+        prev.filter((m) => m.id !== optimisticId)
       )
+      knownMsgIdsRef.current.delete(optimisticId)
       addLog(`Message sent${file ? ` [${file.fileType.toUpperCase()}: ${file.name}]` : ''}`)
     } catch (e) {
       showErr(`Send failed: ${getErr(e)}`)

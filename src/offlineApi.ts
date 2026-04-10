@@ -45,6 +45,26 @@ export interface ChatMessageRecord {
   deliveredAt?: number
   hash: string
   previousHash: string
+  attachmentId?: string
+  attachmentType?: 'image' | 'pdf' | 'doc' | 'ppt' | 'file'
+  attachmentName?: string
+  attachmentSize?: number
+  attachmentMime?: string
+  attachmentData?: string
+}
+
+export interface AttachmentRecord {
+  id: string
+  messageId: string
+  conversationId: string
+  peerId: string
+  type: 'image' | 'pdf' | 'doc' | 'ppt' | 'file'
+  name: string
+  size: number
+  mime: string
+  data: string
+  savedPath?: string
+  createdAt: number
 }
 
 export interface AssessmentQuestion {
@@ -151,7 +171,20 @@ export const offlineApi = {
   listConversations: () => window.electronAPI.offline.listConversations() as Promise<ConversationRecord[]>,
   deleteConversation: (conversationId: string) => window.electronAPI.offline.deleteConversation(conversationId) as Promise<void>,
   getMessages: (conversationId: string) => window.electronAPI.offline.getMessages(conversationId) as Promise<ChatMessageRecord[]>,
-  sendMessage: (peerId: string, content: string, sessionCode?: string) => window.electronAPI.offline.sendMessage(peerId, content, sessionCode) as Promise<ChatMessageRecord>,
+  sendMessage: (
+    peerId: string,
+    content: string,
+    sessionCode?: string,
+    attachment?: {
+      type: AttachmentRecord['type']
+      name: string
+      size: number
+      mime: string
+      data: string
+    }
+  ) => window.electronAPI.offline.sendMessage(peerId, content, sessionCode, attachment) as Promise<ChatMessageRecord>,
+  getAttachment: (attachmentId: string) => window.electronAPI.offline.getAttachment(attachmentId) as Promise<AttachmentRecord | undefined>,
+  saveAttachmentToDisk: (attachmentId: string, suggestedName: string) => window.electronAPI.offline.saveAttachmentToDisk(attachmentId, suggestedName) as Promise<{ canceled: boolean; filePath?: string }>,
   listAssessments: () => window.electronAPI.offline.listAssessments() as Promise<AssessmentRecord[]>,
   createAssessment: (payload: {
     title: string
